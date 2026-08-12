@@ -701,15 +701,18 @@ def serve(
             )
             mission_engine.start()
             # Post-build injection so the agent tools (launch_mission,
-            # mission_status) can reach the engine at call time.
+            # mission_status, choose_mission_option) can reach the engine
+            # at call time.
             try:
                 from openjarvis.tools.mission import (  # noqa: F401
+                    ChooseMissionOptionTool,
                     LaunchMissionTool,
                     MissionStatusTool,
                 )
 
                 LaunchMissionTool._mission_engine = mission_engine
                 MissionStatusTool._mission_engine = mission_engine
+                ChooseMissionOptionTool._mission_engine = mission_engine
             except Exception as exc:  # noqa: BLE001
                 logger.debug("Mission tool injection failed: %s", exc)
             console.print("  Missions: [cyan]active[/cyan]")

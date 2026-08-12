@@ -21,6 +21,7 @@ from openjarvis.missions.engine import (
     _build_report,
     _default_steps,
     coding_pr_steps,
+    improve_steps,
     research_steps,
 )
 from openjarvis.missions.types import Mission, MissionEvent, MissionStep
@@ -696,6 +697,109 @@ def test_research_mission_runs_3_checkpointed_steps(store):
         assert done.status == MissionStatus.SUCCEEDED.value
         assert [s.status for s in done.steps] == ["succeeded"] * 3
         assert len(system.calls) == 3
+    finally:
+        engine.stop()
+
+
+def test_improve_steps_plan_shape():
+    steps = improve_steps("Regarde mon app et améliore-la")
+    assert [s.title for s in steps] == ["Analyse", "Proposition"]
+    assert [s.pause_for_choice for s in steps] == [False, True]
+    assert all(s.required_capabilities == ["coding"] for s in steps)
+
+
+def test_improve_mission_pauses_for_choice_instead_of_executing(store):
+    """The Proposition step succeeding does NOT continue the mission --
+    it stops at WAITING_FOR_CHOICE. In particular none of the 5
+    coding_pr_steps phases (Setup/Implement/Test/Review/Ship) exist yet --
+    nothing gets built before the user picks an option (spec §27)."""
+    coder = FakeCodingAgent()
+    engine = MissionEngine(
+        store, FakeSystem(), coding_agent=coder, worker_capabilities=["coding"]
+    )
+    engine.start()
+    try:
+        mission = engine.launch("Regarde mon app et améliore-la", kind="improve")
+        assert _wait_until(
+            lambda: engine.status(mission.mission_id).status == "waiting_for_choice"
+        )
+        # The audit event is appended just after the status checkpoint, so
+        # wait for both instead of racing the worker (same pattern as the
+        # WAITING_FOR_WORKER tests above).
+        assert _wait_until(
+            lambda: "waiting_for_choice"
+            in [e.event_type for e in store.list_events(mission.mission_id)]
+        )
+        done = engine.status(mission.mission_id)
+        assert [s.status for s in done.steps] == ["succeeded", "succeeded"]
+        assert [s.title for s in done.steps] == ["Analyse", "Proposition"]
+        assert len(done.steps) == 2  # nothing appended/executed yet
+        assert len(coder.calls) == 2  # only Analyse + Proposition ran
+    finally:
+        engine.stop()
+
+
+def test_choose_appends_coding_pr_steps_and_resumes(store):
+    """MissionEngine.choose() appends the 5 coding_pr_steps for the chosen
+    option and resumes -- the mission keeps its Analyse/Proposition history
+    (their titles/count stay put; only new steps get appended after)."""
+    coder = FakeCodingAgent()
+    engine = MissionEngine(
+        store, FakeSystem(), coding_agent=coder, worker_capabilities=["coding"]
+    )
+    engine.start()
+    try:
+        mission = engine.launch("Regarde mon app et améliore-la", kind="improve")
+        assert _wait_until(
+            lambda: engine.status(mission.mission_id).status == "waiting_for_choice"
+        )
+        pre_choice_results = [s.result for s in engine.status(mission.mission_id).steps]
+
+        chosen = engine.choose(mission.mission_id, "Option 1 (les tests)")
+        assert chosen is not None
+        assert len(chosen.steps) == 7  # 2 (Analyse/Proposition) + 5 (coding_pr)
+        assert [s.title for s in chosen.steps[:2]] == ["Analyse", "Proposition"]
+        assert [s.title for s in chosen.steps[2:]] == [
+            "Setup", "Implement", "Test", "Review", "Ship",
+        ]
+        assert _wait_until(lambda: engine.status(mission.mission_id).is_terminal)
+        done = engine.status(mission.mission_id)
+        assert done.status == MissionStatus.SUCCEEDED.value
+        assert [s.status for s in done.steps] == ["succeeded"] * 7
+        # The original 2 steps' results are untouched by the later phases.
+        assert [s.result for s in done.steps[:2]] == pre_choice_results
+        assert done.metadata.get("chosen_option") == "Option 1 (les tests)"
+        assert len(coder.calls) == 7  # Analyse+Proposition, then the 5 appended phases
+        assert "Option choisie par l'utilisateur : Option 1" in coder.calls[2]
+    finally:
+        engine.stop()
+
+
+def test_choose_without_mission_id_targets_most_recent_for_requester(store):
+    system = FakeSystem(["Analyse.", "1. A\n2. B"])
+    coder = FakeCodingAgent()
+    engine = MissionEngine(store, system, coding_agent=coder, worker_capabilities=["coding"])
+    engine.start()
+    try:
+        mission = engine.launch(
+            "Regarde mon app", kind="improve", requested_by="telegram:42"
+        )
+        assert _wait_until(
+            lambda: engine.status(mission.mission_id).status == "waiting_for_choice"
+        )
+        chosen = engine.choose(None, "la 1", requested_by="telegram:42")
+        assert chosen is not None
+        assert chosen.mission_id == mission.mission_id
+        assert _wait_until(lambda: engine.status(mission.mission_id).is_terminal)
+    finally:
+        engine.stop()
+
+
+def test_choose_returns_none_when_nothing_pending(store):
+    engine = MissionEngine(store, FakeSystem())
+    engine.start()
+    try:
+        assert engine.choose(None, "n'importe quoi", requested_by="telegram:999") is None
     finally:
         engine.stop()
 

@@ -156,7 +156,11 @@ class MissionEngine:
         (setup / implement / test / review / ship) instead of one mega-step —
         see :func:`coding_pr_steps`. ``kind="research"`` auto-plans a sourced,
         cross-checked research mission as 3 checkpointed steps — see
-        :func:`research_steps`. Both ignored if ``steps`` is given explicitly.
+        :func:`research_steps`. ``kind="improve"`` auto-plans an open-ended
+        "analyze then propose" mission that pauses
+        (``WAITING_FOR_CHOICE``) for the user to pick an option before
+        anything is executed — see :func:`improve_steps` and
+        :meth:`choose`. All ignored if ``steps`` is given explicitly.
         """
         goal = (goal or "").strip()
         if not goal:
@@ -165,6 +169,8 @@ class MissionEngine:
             steps = coding_pr_steps(goal)
         elif steps is None and kind == "research":
             steps = research_steps(goal)
+        elif steps is None and kind == "improve":
+            steps = improve_steps(goal)
         mission = Mission(
             mission_id=uuid.uuid4().hex[:16],
             goal=goal,
@@ -234,6 +240,58 @@ class MissionEngine:
         self._publish(EventType.MISSION_RESUMED, {"mission_id": mission_id})
         self.submit(mission_id)
         return mission
+
+    def choose(
+        self,
+        mission_id: Optional[str],
+        choice: str,
+        *,
+        requested_by: str = "",
+    ) -> Optional[Mission]:
+        """Resume a WAITING_FOR_CHOICE mission with the user's free-text pick.
+
+        Appends :func:`coding_pr_steps` for ``{original goal} + chosen
+        option`` to the mission's step list and resumes -- the mission
+        keeps its history (Analyse/Proposition results stay visible) rather
+        than starting a new one, so ``mission_status`` still reads as one
+        continuous story.
+
+        ``mission_id=None`` picks the most recent WAITING_FOR_CHOICE
+        mission (filtered to ``requested_by`` when given) so a Telegram
+        reply doesn't need to quote the mission_id back -- there is
+        normally at most one pending proposal per user at a time.
+        """
+        mission = self._resolve_choice_target(mission_id, requested_by)
+        if mission is None:
+            return None
+        if mission.status != MissionStatus.WAITING_FOR_CHOICE.value:
+            return mission
+
+        chosen_goal = f"{mission.goal}\n\nOption choisie par l'utilisateur : {choice}"
+        next_index = len(mission.steps)
+        appended = coding_pr_steps(chosen_goal)
+        for offset, step in enumerate(appended):
+            step.index = next_index + offset
+        mission.steps.extend(appended)
+        mission.metadata["chosen_option"] = choice
+        mission.status = MissionStatus.PENDING.value
+        self._store.save_mission(mission)
+        self._append_event(mission.mission_id, "choice_made", {"choice": choice})
+        self._publish(EventType.MISSION_RESUMED, {"mission_id": mission.mission_id})
+        self.submit(mission.mission_id)
+        return mission
+
+    def _resolve_choice_target(
+        self, mission_id: Optional[str], requested_by: str
+    ) -> Optional[Mission]:
+        if mission_id:
+            return self._store.get_mission(mission_id)
+        candidates = self._store.list_missions(
+            status=MissionStatus.WAITING_FOR_CHOICE.value, limit=20
+        )
+        if requested_by:
+            candidates = [m for m in candidates if m.requested_by == requested_by]
+        return candidates[0] if candidates else None
 
     def cancel(self, mission_id: str) -> Optional[Mission]:
         """Cancel a non-terminal mission."""
@@ -376,6 +434,27 @@ class MissionEngine:
             mission.current_step = step.index + 1
             # Checkpoint BEFORE the next step — crash-safe by construction.
             self._store.save_mission(mission)
+
+            # spec §27: a step that just proposed options waits for the
+            # user's free-text pick (MissionEngine.choose()) rather than
+            # continuing on its own — independent of autonomy_level, since
+            # this isn't "approve the next step", it's "which option even
+            # is the next step".
+            if getattr(step, "pause_for_choice", False):
+                mission.status = MissionStatus.WAITING_FOR_CHOICE.value
+                self._store.save_mission(mission)
+                self._append_event(
+                    mission_id, "waiting_for_choice", {"step": step.index}
+                )
+                self._notify(
+                    mission,
+                    title="JARVIS PROPOSE",
+                    message=(
+                        f"{step.result}\n\n(Réponds avec ton choix — "
+                        f"mission {mission_id})"
+                    ),
+                )
+                return
 
             # Autonomy 0: require explicit approval between every step.
             if mission.autonomy_level == 0:
@@ -743,6 +822,52 @@ def research_steps(goal: str) -> List[MissionStep]:
     ]
 
 
+def improve_steps(goal: str) -> List[MissionStep]:
+    """Checkpointed plan for spec §27 -- open-ended requests ("look at my
+    app and improve it") get analyzed and proposed *before* anything is
+    touched, unlike :func:`coding_pr_steps` which assumes the goal is
+    already a concrete instruction ("add X").
+
+    Two steps: Analyse, then Proposition. Proposition sets
+    ``pause_for_choice=True`` -- the engine stops there
+    (``MissionStatus.WAITING_FOR_CHOICE``) instead of executing anything,
+    and :meth:`MissionEngine.choose` appends the concrete
+    :func:`coding_pr_steps` for whichever option the user picks.
+    """
+    return [
+        MissionStep(
+            index=0,
+            title="Analyse",
+            prompt=(
+                f"Mission : {goal}\n\n"
+                "Étape 1/2 (Analyse). Inspecte réellement le projet/dépôt "
+                "concerné : structure, conventions, technologies, ce qui "
+                "existe déjà. Cite les fichiers que tu as vraiment lus. Ne "
+                "propose rien encore, ne modifie rien. Termine par un "
+                "résumé factuel de ce que tu as trouvé."
+            ),
+            required_capabilities=["coding"],
+        ),
+        MissionStep(
+            index=1,
+            title="Proposition",
+            prompt=(
+                f"Mission : {goal}\n\n"
+                "Étape 2/2 (Proposition). Sur la base de l'analyse "
+                "ci-dessus (contexte fourni juste avant ce message), "
+                "propose 3 à 4 améliorations concrètes distinctes. Pour "
+                "chacune : ce que ça change, pourquoi c'est utile, une "
+                "priorité justifiée. Numérote-les clairement (1., 2., "
+                "3., ...). Ne code rien, n'ouvre aucun fichier en "
+                "écriture. Termine en demandant explicitement laquelle "
+                "implémenter (un numéro, plusieurs, ou une autre idée)."
+            ),
+            required_capabilities=["coding"],
+            pause_for_choice=True,
+        ),
+    ]
+
+
 def _build_report(mission: Mission) -> str:
     lines = [
         f"# Rapport de mission — {mission.mission_id}",
@@ -771,6 +896,7 @@ __all__ = [
     "_default_steps",
     "coding_pr_steps",
     "research_steps",
+    "improve_steps",
     "_build_report",
     "_estimate_tokens",
 ]

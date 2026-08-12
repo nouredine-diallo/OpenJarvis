@@ -44,20 +44,27 @@ class LaunchMissionTool(BaseTool):
                     },
                     "kind": {
                         "type": "string",
-                        "enum": ["default", "coding_pr", "research"],
+                        "enum": ["default", "coding_pr", "research", "improve"],
                         "description": (
                             "'coding_pr' auto-plans a coding mission that "
                             "ends in an open PR as 5 checkpointed steps "
-                            "(setup/implement/test/review/ship) -- use for "
-                            "any request that implies writing code, fixing "
-                            "a bug, or opening a PR. 'research' auto-plans a "
-                            "sourced, cross-checked research mission as 3 "
-                            "checkpointed steps (search/cross-check/"
-                            "synthesize with citations) -- use for "
-                            "'find out X', 'compare X and Y', 'what's the "
-                            "best approach for X' style requests. 'default' "
-                            "(or omitted) for single-shot tasks that are "
-                            "neither."
+                            "(setup/implement/test/review/ship) -- use ONLY "
+                            "when the request already says exactly what to "
+                            "build/fix ('add X', 'fix bug Y'). 'improve' "
+                            "auto-plans an open-ended request ('look at my "
+                            "app and make it better', 'what should I "
+                            "improve') as analyze-then-propose: it stops "
+                            "after proposing 3-4 concrete options and waits "
+                            "for the user's pick (see choose_mission_option) "
+                            "-- use this whenever the WHAT isn't already "
+                            "decided, never coding_pr for those. 'research' "
+                            "auto-plans a sourced, cross-checked research "
+                            "mission as 3 checkpointed steps (search/"
+                            "cross-check/synthesize with citations) -- use "
+                            "for 'find out X', 'compare X and Y', 'what's "
+                            "the best approach for X' style requests. "
+                            "'default' (or omitted) for single-shot tasks "
+                            "that are none of these."
                         ),
                     },
                     "autonomy_level": {
@@ -172,6 +179,87 @@ class MissionStatusTool(BaseTool):
         )
 
 
+@ToolRegistry.register("choose_mission_option")
+class ChooseMissionOptionTool(BaseTool):
+    """Pick one of the options a WAITING_FOR_CHOICE mission proposed."""
+
+    tool_id = "choose_mission_option"
+    _mission_engine: Optional[Any] = None
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="choose_mission_option",
+            description=(
+                "Answer a mission that proposed options and is waiting for "
+                "the user's pick (status WAITING_FOR_CHOICE, from a "
+                "kind='improve' mission). Call this when the user replies "
+                "to a JARVIS PROPOSE notification with which option(s) they "
+                "want -- a number, several numbers, 'all', or a different "
+                "idea in their own words. mission_id is optional: omitted, "
+                "it targets the user's most recent pending proposal."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "choice": {
+                        "type": "string",
+                        "description": "The user's pick, in their own words "
+                        "(e.g. 'option 2', 'la 1 et la 3', 'plutôt ça: ...').",
+                    },
+                    "mission_id": {
+                        "type": "string",
+                        "description": "Optional -- omit to target the most "
+                        "recent pending proposal for this user.",
+                    },
+                },
+                "required": ["choice"],
+            },
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        engine = self._mission_engine
+        if engine is None:
+            return ToolResult(
+                tool_name=self.tool_id,
+                content="Mission engine is not available on this server.",
+                success=False,
+            )
+        choice = str(params.get("choice", "")).strip()
+        if not choice:
+            return ToolResult(
+                tool_name=self.tool_id,
+                content="Il faut préciser le choix.",
+                success=False,
+            )
+        mission_id = str(params.get("mission_id", "") or "").strip() or None
+        requested_by = params.get("_channel", "") or params.get("requested_by", "")
+        mission = engine.choose(mission_id, choice, requested_by=requested_by)
+        if mission is None:
+            return ToolResult(
+                tool_name=self.tool_id,
+                content="Aucune proposition en attente trouvée.",
+                success=False,
+            )
+        if mission.status not in ("pending", "running"):
+            return ToolResult(
+                tool_name=self.tool_id,
+                content=(
+                    f"Mission {mission.mission_id} n'est pas en attente d'un "
+                    f"choix (statut : {mission.status})."
+                ),
+                success=False,
+            )
+        return ToolResult(
+            tool_name=self.tool_id,
+            content=(
+                f"Choix pris en compte pour la mission {mission.mission_id} "
+                f"— exécution lancée."
+            ),
+            metadata={"mission_id": mission.mission_id},
+        )
+
+
 def _format_status(mission) -> str:
     lines = [
         f"Mission {mission.mission_id} — {mission.status}",
@@ -192,4 +280,4 @@ def _format_status(mission) -> str:
     return "\n".join(lines)
 
 
-__all__ = ["LaunchMissionTool", "MissionStatusTool"]
+__all__ = ["LaunchMissionTool", "MissionStatusTool", "ChooseMissionOptionTool"]

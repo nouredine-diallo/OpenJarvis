@@ -9,12 +9,18 @@ The mission lifecycle is::
     PENDING -> RUNNING -> SUCCEEDED
                  |  \\--> PAUSED -> RUNNING
                  |  \\--> WAITING_FOR_WORKER -> RUNNING   (D12)
+                 |  \\--> WAITING_FOR_CHOICE -> RUNNING   (spec §27)
                  \\--> FAILED
                  \\--> CANCELLED
 
 A mission ``WAITING_FOR_WORKER`` has been accepted but some step needs a
 capability the current worker lacks (Docker, browser, GPU…); it resumes
 automatically when a capable worker registers.
+
+A mission ``WAITING_FOR_CHOICE`` has finished proposing options (spec §27:
+"propose, then offer to implement isolated") and is waiting on the user's
+free-text pick -- see ``MissionEngine.choose()`` and
+``missions.engine.improve_steps``.
 """
 
 from __future__ import annotations
@@ -34,6 +40,7 @@ class MissionStatus(str, Enum):
     RUNNING = "running"
     PAUSED = "paused"
     WAITING_FOR_WORKER = "waiting_for_worker"
+    WAITING_FOR_CHOICE = "waiting_for_choice"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -42,7 +49,13 @@ class MissionStatus(str, Enum):
     def inflight(cls) -> frozenset["MissionStatus"]:
         """Statuses that mean the mission still has work to do."""
         return frozenset(
-            {cls.PENDING, cls.RUNNING, cls.PAUSED, cls.WAITING_FOR_WORKER}
+            {
+                cls.PENDING,
+                cls.RUNNING,
+                cls.PAUSED,
+                cls.WAITING_FOR_WORKER,
+                cls.WAITING_FOR_CHOICE,
+            }
         )
 
 
@@ -75,6 +88,10 @@ class MissionStep:
     # if unavailable; the engine just falls back to the normal coding agent
     # or system. Used for steps where quality matters most (self-review).
     prefer_heavy: bool = False
+    # When this step succeeds, the mission goes WAITING_FOR_CHOICE instead
+    # of continuing to the next step (spec §27: propose options, wait for
+    # the user to pick one, THEN act). Resumed via MissionEngine.choose().
+    pause_for_choice: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

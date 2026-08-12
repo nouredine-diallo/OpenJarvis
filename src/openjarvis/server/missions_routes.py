@@ -6,7 +6,7 @@ Endpoints mirror the mission lifecycle:
 * ``GET  /v1/missions``         → list missions
 * ``GET  /v1/missions/{id}``    → live state (resume point after a crash)
 * ``GET  /v1/missions/{id}/events`` → immutable audit trail
-* ``POST /v1/missions/{id}/pause|resume|cancel`` → lifecycle control
+* ``POST /v1/missions/{id}/pause|resume|cancel|choose`` → lifecycle control
 
 The engine is reached through ``request.app.state.mission_engine``; if it is
 not present (missions disabled), the router returns 503.
@@ -146,3 +146,18 @@ async def cancel_mission(mission_id: str, request: Request):
     if mission is None:
         raise HTTPException(status_code=404, detail="Mission not found")
     return {"mission_id": mission_id, "status": mission.status}
+
+
+class _ChoiceIn(BaseModel):
+    choice: str
+
+
+@router.post("/{mission_id}/choose")
+async def choose_mission_option(mission_id: str, body: _ChoiceIn, request: Request):
+    """Resume a WAITING_FOR_CHOICE mission (kind="improve") with the
+    user's pick -- appends the concrete execution steps and resumes."""
+    engine = _engine(request)
+    mission = engine.choose(mission_id, body.choice)
+    if mission is None:
+        raise HTTPException(status_code=404, detail="Mission not found")
+    return {"mission_id": mission.mission_id, "status": mission.status}
