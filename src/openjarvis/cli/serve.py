@@ -576,11 +576,14 @@ def serve(
             except Exception as exc:  # noqa: BLE001
                 logger.debug("Coding agent init failed: %s", exc)
 
-            # Frontier tier: headless `claude` CLI on the user's Claude.ai
-            # subscription (not a metered API key -- see claude_subscription.py).
-            # Soft preference only (MissionStep.prefer_heavy); never blocks a
-            # mission if unavailable or over its daily estimated-spend guard.
-            _heavy_agent = None
+            # Frontier tier(s): headless CLIs on the user's own subscriptions
+            # (not metered API keys -- see claude_subscription.py /
+            # gemini_subscription.py). Soft preference only
+            # (MissionStep.prefer_heavy); tried in order, never blocks a
+            # mission if all are unavailable/erroring/over budget. Distributes
+            # "heavy" work across whichever subscription is actually usable
+            # right now instead of hammering a single one.
+            _heavy_agents: list = []
             if config.missions.enable_claude_subscription_tier:
                 try:
                     from openjarvis.agents.claude_subscription import (
@@ -589,15 +592,33 @@ def serve(
                     )
 
                     if is_claude_subscription_available():
-                        _heavy_agent = ClaudeSubscriptionAgent(
-                            workspace=os.getcwd(),
-                            daily_budget_usd=config.missions.claude_subscription_daily_budget_usd,
+                        _heavy_agents.append(
+                            ClaudeSubscriptionAgent(
+                                workspace=os.getcwd(),
+                                daily_budget_usd=config.missions.claude_subscription_daily_budget_usd,
+                            )
                         )
                         console.print(
                             "  Heavy-reasoning agent: [magenta]claude (subscription)[/magenta]"
                         )
                 except Exception as exc:  # noqa: BLE001
-                    logger.debug("Heavy agent init failed: %s", exc)
+                    logger.debug("Claude heavy agent init failed: %s", exc)
+            if config.missions.enable_gemini_subscription_tier:
+                try:
+                    from openjarvis.agents.gemini_subscription import (
+                        GeminiSubscriptionAgent,
+                        is_gemini_subscription_available,
+                    )
+
+                    if is_gemini_subscription_available():
+                        _heavy_agents.append(
+                            GeminiSubscriptionAgent(workspace=os.getcwd())
+                        )
+                        console.print(
+                            "  Heavy-reasoning agent: [magenta]gemini (subscription)[/magenta]"
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Gemini heavy agent init failed: %s", exc)
 
             # Missions orchestrator: reuse the wired channel system only when it
             # already carries coding tools; otherwise build a dedicated
@@ -674,7 +695,7 @@ def serve(
                 worker_capabilities=config.missions.worker_capabilities or _default_worker_caps(),
                 report_base_url=config.missions.report_base_url,
                 coding_agent=_coding_agent,
-                heavy_agent=_heavy_agent,
+                heavy_agents=_heavy_agents,
             )
             mission_engine.start()
             # Post-build injection so the agent tools (launch_mission,

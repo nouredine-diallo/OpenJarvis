@@ -612,6 +612,41 @@ def test_prefer_heavy_falls_back_on_error(store):
             engine.stop()
 
 
+def test_prefer_heavy_tries_multiple_agents_in_order(store):
+    """Multiple frontier tiers (e.g. Claude subscription + Gemini
+    subscription) are tried in order -- the first one down/erroring
+    doesn't stop the step, it just moves to the next candidate. This is
+    the 'combine several LLMs, distribute the work' fallback chain."""
+    coder = FakeCodingAgent()
+    first_down = FakeHeavyAgent(fail=True)
+    second_up = FakeHeavyAgent(output="Avis du deuxième modèle : diff propre.")
+    engine = MissionEngine(
+        store, FakeSystem(), coding_agent=coder,
+        heavy_agent=first_down, heavy_agents=[second_up],
+        worker_capabilities=["coding"],
+    )
+    engine.start()
+    try:
+        mission = engine.launch(
+            "Mission",
+            steps=[
+                MissionStep(
+                    index=0, title="Review", prompt="Relis le diff",
+                    required_capabilities=["coding"], prefer_heavy=True,
+                )
+            ],
+        )
+        assert _wait_until(lambda: engine.status(mission.mission_id).is_terminal)
+        done = engine.status(mission.mission_id)
+        assert done.status == MissionStatus.SUCCEEDED.value
+        assert len(first_down.calls) == 1
+        assert len(second_up.calls) == 1
+        assert len(coder.calls) == 0
+        assert "deuxième modèle" in done.steps[0].result
+    finally:
+        engine.stop()
+
+
 def test_coding_pr_mission_runs_5_checkpointed_steps(store):
     """kind='coding_pr' auto-plans 5 steps instead of one mega-step, and the
     engine checkpoints (saves) the mission after each one succeeds."""

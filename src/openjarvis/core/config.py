@@ -1441,6 +1441,11 @@ class MissionsConfig:
     # missions cannot silently eat the quota needed for interactive use.
     enable_claude_subscription_tier: bool = True
     claude_subscription_daily_budget_usd: float = 3.0
+    # Second frontier tier (GeminiSubscriptionAgent, headless `gemini` CLI),
+    # tried after Claude in the same prefer_heavy fallback chain -- a
+    # personal Gemini Pro/Ultra account, not a metered API key. Distributes
+    # "heavy" work across whichever subscription is actually available.
+    enable_gemini_subscription_tier: bool = True
 
 
 @dataclass(slots=True)

@@ -69,6 +69,7 @@ class MissionEngine:
         report_base_url: str = "",
         coding_agent: Optional[Any] = None,
         heavy_agent: Optional[Any] = None,
+        heavy_agents: Optional[List[Any]] = None,
     ) -> None:
         self._store = store
         self._system = system
@@ -86,11 +87,16 @@ class MissionEngine:
         # declare the ``coding`` capability dispatch here instead of a plain
         # LLM answer. Falls back to the plain system when absent.
         self._coding_agent = coding_agent
-        # "Frontier" tier (e.g. ClaudeSubscriptionAgent) for steps that set
-        # MissionStep.prefer_heavy. A *soft* preference: unlike
-        # required_capabilities it never blocks the mission -- unavailable
+        # "Frontier" tier(s) (e.g. ClaudeSubscriptionAgent, GeminiSubscriptionAgent)
+        # for steps that set MissionStep.prefer_heavy. Tried in order --
+        # ``heavy_agent`` (singular, kept for backwards compatibility) goes
+        # first if given, then ``heavy_agents``. Each is a *soft* preference:
+        # unlike required_capabilities it never blocks the mission -- unavailable
         # or failing heavy_agent just falls back to coding_agent/system.
-        self._heavy_agent = heavy_agent
+        agents: List[Any] = list(heavy_agents or [])
+        if heavy_agent is not None and heavy_agent not in agents:
+            agents.insert(0, heavy_agent)
+        self._heavy_agents: List[Any] = agents
         self._queue: "queue.Queue[Any]" = queue.Queue()
         self._thread: Optional[threading.Thread] = None
         self._running = threading.Event()
@@ -410,12 +416,12 @@ class MissionEngine:
             # single-mega-step version of Phase 5.
             prompt = self._with_step_context(mission, step, prompt)
 
-        if getattr(step, "prefer_heavy", False) and self._heavy_agent is not None:
-            content = self._try_heavy_agent(prompt)
+        if getattr(step, "prefer_heavy", False) and self._heavy_agents:
+            content = self._try_heavy_agents(prompt)
             if content is not None:
                 return content
             # Falls through to the normal coding_agent/system path below --
-            # a soft preference must never fail a step just because the
+            # a soft preference must never fail a step just because every
             # frontier tier was unavailable or over budget.
 
         if is_coding and self._coding_agent is not None:
@@ -435,21 +441,26 @@ class MissionEngine:
             raise RuntimeError("Step returned an empty result")
         return str(content)
 
-    def _try_heavy_agent(self, prompt: str) -> Optional[str]:
-        """Best-effort call to the frontier tier. Returns ``None`` (never
-        raises) on any failure so the caller can fall back cleanly."""
-        try:
-            result = self._heavy_agent.run(prompt)
-        except Exception:  # noqa: BLE001
-            logger.debug("Heavy agent call failed, falling back", exc_info=True)
-            return None
-        if getattr(result, "metadata", None) and result.metadata.get("error"):
-            logger.debug("Heavy agent returned an error, falling back: %s", result.metadata)
-            return None
-        content = getattr(result, "content", None) or ""
-        if not str(content).strip():
-            return None
-        return str(content)
+    def _try_heavy_agents(self, prompt: str) -> Optional[str]:
+        """Best-effort call across the frontier tiers, in order (e.g. Claude
+        subscription, then Gemini subscription). Returns ``None`` (never
+        raises) once every candidate has failed, so the caller can fall
+        back to the normal coding_agent/system path cleanly. This is also
+        how work distributes across subscriptions: whichever tier is
+        logged in / under budget / not rate-limited answers first."""
+        for agent in self._heavy_agents:
+            try:
+                result = agent.run(prompt)
+            except Exception:  # noqa: BLE001
+                logger.debug("Heavy agent %r call failed, trying next", agent, exc_info=True)
+                continue
+            if getattr(result, "metadata", None) and result.metadata.get("error"):
+                logger.debug("Heavy agent %r returned an error, trying next: %s", agent, result.metadata)
+                continue
+            content = getattr(result, "content", None) or ""
+            if str(content).strip():
+                return str(content)
+        return None
 
     def _with_step_context(self, mission: Mission, step: MissionStep, prompt: str) -> str:
         """Prepend a summary of already-succeeded steps to a coding prompt.
