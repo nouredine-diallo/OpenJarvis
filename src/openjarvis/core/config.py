@@ -1433,6 +1433,14 @@ class MissionsConfig:
     # for steps that already passed the required_capabilities gate. Headless
     # missions have no human to confirm; false keeps the strict default.
     auto_approve_tools: bool = True
+    # Frontier tier (ClaudeSubscriptionAgent, headless `claude` CLI) for
+    # steps that set prefer_heavy=True (e.g. the Review phase of
+    # coding_pr_steps). Uses the user's Claude.ai subscription quota, not a
+    # metered API key -- true enables it when the CLI is available and
+    # logged in; the daily guard below caps *estimated* spend so automated
+    # missions cannot silently eat the quota needed for interactive use.
+    enable_claude_subscription_tier: bool = True
+    claude_subscription_daily_budget_usd: float = 3.0
 
 
 @dataclass(slots=True)

@@ -69,6 +69,12 @@ class MissionStep:
     finished_at: float = 0.0
     retries: int = 0
     required_capabilities: List[str] = field(default_factory=list)
+    # Soft preference for the "heavy reasoning" agent tier (e.g. the user's
+    # Claude subscription CLI) when one is configured -- unlike
+    # required_capabilities this never blocks the mission (WAITING_FOR_WORKER)
+    # if unavailable; the engine just falls back to the normal coding agent
+    # or system. Used for steps where quality matters most (self-review).
+    prefer_heavy: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

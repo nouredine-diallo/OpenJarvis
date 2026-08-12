@@ -67,6 +67,23 @@ class FakeCodingAgent:
         return type("AgentResult", (), {"content": self.output})()
 
 
+class FakeHeavyAgent:
+    """Stand-in for ClaudeSubscriptionAgent (the frontier/heavy tier)."""
+
+    def __init__(self, output="Review approfondie : rien à signaler.", fail=False, error=False):
+        self.output = output
+        self.fail = fail
+        self.error = error
+        self.calls = []
+
+    def run(self, prompt):
+        self.calls.append(prompt)
+        if self.fail:
+            raise RuntimeError("claude CLI unavailable")
+        metadata = {"error": True} if self.error else {}
+        return type("AgentResult", (), {"content": "" if self.error else self.output, "metadata": metadata})()
+
+
 # ---------------------------------------------------------------------------
 # Store
 # ---------------------------------------------------------------------------
@@ -508,6 +525,91 @@ def test_coding_pr_steps_plan_shape():
     assert all(s.required_capabilities == ["coding"] for s in steps)
     assert [s.index for s in steps] == [0, 1, 2, 3, 4]
     assert all("Améliore la page d'accueil" in s.prompt for s in steps)
+    # Only Review prefers the frontier tier -- the rest stay on the fast/free
+    # coding agent by default.
+    assert [s.prefer_heavy for s in steps] == [False, False, False, True, False]
+
+
+def test_prefer_heavy_step_dispatches_to_heavy_agent(store):
+    """A prefer_heavy step routes to the heavy agent, not the coding agent."""
+    coder = FakeCodingAgent()
+    heavy = FakeHeavyAgent()
+    engine = MissionEngine(
+        store, FakeSystem(), coding_agent=coder, heavy_agent=heavy,
+        worker_capabilities=["coding"],
+    )
+    engine.start()
+    try:
+        mission = engine.launch(
+            "Ajoute un endpoint /health",
+            steps=[
+                MissionStep(
+                    index=0, title="Review", prompt="Relis le diff",
+                    required_capabilities=["coding"], prefer_heavy=True,
+                )
+            ],
+        )
+        assert _wait_until(lambda: engine.status(mission.mission_id).is_terminal)
+        done = engine.status(mission.mission_id)
+        assert done.status == MissionStatus.SUCCEEDED.value
+        assert len(heavy.calls) == 1
+        assert len(coder.calls) == 0
+        assert "rien à signaler" in done.steps[0].result
+    finally:
+        engine.stop()
+
+
+def test_prefer_heavy_falls_back_when_agent_missing(store):
+    """No heavy_agent configured -> the step still runs, via coding_agent."""
+    coder = FakeCodingAgent()
+    engine = MissionEngine(
+        store, FakeSystem(), coding_agent=coder, worker_capabilities=["coding"],
+    )
+    engine.start()
+    try:
+        mission = engine.launch(
+            "Mission",
+            steps=[
+                MissionStep(
+                    index=0, title="Review", prompt="Relis le diff",
+                    required_capabilities=["coding"], prefer_heavy=True,
+                )
+            ],
+        )
+        assert _wait_until(lambda: engine.status(mission.mission_id).is_terminal)
+        done = engine.status(mission.mission_id)
+        assert done.status == MissionStatus.SUCCEEDED.value
+        assert len(coder.calls) == 1
+    finally:
+        engine.stop()
+
+
+def test_prefer_heavy_falls_back_on_error(store):
+    """heavy_agent crashing or returning an error never fails the step --
+    the soft preference degrades to coding_agent instead."""
+    coder = FakeCodingAgent()
+    for heavy in (FakeHeavyAgent(fail=True), FakeHeavyAgent(error=True)):
+        engine = MissionEngine(
+            store, FakeSystem(), coding_agent=coder, heavy_agent=heavy,
+            worker_capabilities=["coding"],
+        )
+        engine.start()
+        try:
+            mission = engine.launch(
+                "Mission",
+                steps=[
+                    MissionStep(
+                        index=0, title="Review", prompt="Relis le diff",
+                        required_capabilities=["coding"], prefer_heavy=True,
+                    )
+                ],
+            )
+            assert _wait_until(lambda: engine.status(mission.mission_id).is_terminal)
+            done = engine.status(mission.mission_id)
+            assert done.status == MissionStatus.SUCCEEDED.value
+            assert "Patch appliqué" in done.steps[0].result
+        finally:
+            engine.stop()
 
 
 def test_coding_pr_mission_runs_5_checkpointed_steps(store):

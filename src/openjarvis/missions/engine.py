@@ -68,6 +68,7 @@ class MissionEngine:
         worker_capabilities: Optional[Iterable[str]] = None,
         report_base_url: str = "",
         coding_agent: Optional[Any] = None,
+        heavy_agent: Optional[Any] = None,
     ) -> None:
         self._store = store
         self._system = system
@@ -85,6 +86,11 @@ class MissionEngine:
         # declare the ``coding`` capability dispatch here instead of a plain
         # LLM answer. Falls back to the plain system when absent.
         self._coding_agent = coding_agent
+        # "Frontier" tier (e.g. ClaudeSubscriptionAgent) for steps that set
+        # MissionStep.prefer_heavy. A *soft* preference: unlike
+        # required_capabilities it never blocks the mission -- unavailable
+        # or failing heavy_agent just falls back to coding_agent/system.
+        self._heavy_agent = heavy_agent
         self._queue: "queue.Queue[Any]" = queue.Queue()
         self._thread: Optional[threading.Thread] = None
         self._running = threading.Event()
@@ -403,6 +409,15 @@ class MissionEngine:
             # work -- the redundant rebase/re-clone loop observed in the
             # single-mega-step version of Phase 5.
             prompt = self._with_step_context(mission, step, prompt)
+
+        if getattr(step, "prefer_heavy", False) and self._heavy_agent is not None:
+            content = self._try_heavy_agent(prompt)
+            if content is not None:
+                return content
+            # Falls through to the normal coding_agent/system path below --
+            # a soft preference must never fail a step just because the
+            # frontier tier was unavailable or over budget.
+
         if is_coding and self._coding_agent is not None:
             result = self._coding_agent.run(prompt)
             content = getattr(result, "content", None) or ""
@@ -418,6 +433,22 @@ class MissionEngine:
         content = (result or {}).get("content", "")
         if not content or not str(content).strip():
             raise RuntimeError("Step returned an empty result")
+        return str(content)
+
+    def _try_heavy_agent(self, prompt: str) -> Optional[str]:
+        """Best-effort call to the frontier tier. Returns ``None`` (never
+        raises) on any failure so the caller can fall back cleanly."""
+        try:
+            result = self._heavy_agent.run(prompt)
+        except Exception:  # noqa: BLE001
+            logger.debug("Heavy agent call failed, falling back", exc_info=True)
+            return None
+        if getattr(result, "metadata", None) and result.metadata.get("error"):
+            logger.debug("Heavy agent returned an error, falling back: %s", result.metadata)
+            return None
+        content = getattr(result, "content", None) or ""
+        if not str(content).strip():
+            return None
         return str(content)
 
     def _with_step_context(self, mission: Mission, step: MissionStep, prompt: str) -> str:
@@ -578,6 +609,7 @@ def coding_pr_steps(goal: str) -> List[MissionStep]:
             "positionne-toi dedans. Ne fais AUCUNE modification de code ici. "
             "Termine en indiquant clairement : chemin du dépôt local, nom de "
             "la branche créée, commit de départ.",
+            False,
         ),
         (
             "Implement",
@@ -586,6 +618,7 @@ def coding_pr_steps(goal: str) -> List[MissionStep]:
             "Reste isolé : ne touche que les fichiers nécessaires. "
             "N'exécute pas encore les tests. Termine en listant les fichiers "
             "créés/modifiés.",
+            False,
         ),
         (
             "Test",
@@ -594,6 +627,7 @@ def coding_pr_steps(goal: str) -> List[MissionStep]:
             "corrige et relance jusqu'à succès (ou explique précisément "
             "pourquoi ce n'est pas possible). Termine par le résultat réel "
             "des tests (nombre passés/échoués), jamais une supposition.",
+            False,
         ),
         (
             "Review",
@@ -601,6 +635,10 @@ def coding_pr_steps(goal: str) -> List[MissionStep]:
             "reviewer exigeant : régressions, fichiers non liés touchés par "
             "erreur, oublis. Corrige si besoin et re-vérifie. Termine par un "
             "résumé du diff final.",
+            True,  # prefer_heavy: this is the step where catching a bug
+            # is worth more than saving a few seconds -- routed to the
+            # frontier tier (ClaudeSubscriptionAgent) when configured,
+            # with an automatic fallback to the normal coding agent.
         ),
         (
             "Ship",
@@ -609,6 +647,7 @@ def coding_pr_steps(goal: str) -> List[MissionStep]:
             "branche par défaut. Ne refais PAS le clone ni la branche (déjà "
             "faits à l'étape 1) ni un rebase inutile. Termine par l'URL de la "
             "PR ouverte.",
+            False,
         ),
     ]
     return [
@@ -617,8 +656,9 @@ def coding_pr_steps(goal: str) -> List[MissionStep]:
             title=title,
             prompt=f"Mission : {goal}\n\n{body}",
             required_capabilities=["coding"],
+            prefer_heavy=prefer_heavy,
         )
-        for i, (title, body) in enumerate(phases)
+        for i, (title, body, prefer_heavy) in enumerate(phases)
     ]
 
 
