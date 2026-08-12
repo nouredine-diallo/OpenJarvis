@@ -188,6 +188,68 @@ def test_verifier_flags_missing_step_result():
     assert v["verified"] is False
 
 
+def test_verifier_flags_step_that_honestly_reports_being_blocked():
+    """Reproduces the exact live failure (2026-08-12): a coding_pr_steps
+    mission where every step honestly says it couldn't do its job
+    (permissions/sandbox refused writes) -- each step still has
+    non-empty result text, so it gets checkpointed 'succeeded', but the
+    mission must NOT be allowed to report overall success."""
+    m = Mission(
+        mission_id="x",
+        goal="Ajoute des tests",
+        created_at=1.0,
+        updated_at=1.0,
+        status="succeeded",
+        report="Mission terminée.",
+        steps=[
+            MissionStep(index=0, title="Setup", status="succeeded", result="Les commandes git sont bloquées par les permissions."),
+            MissionStep(index=1, title="Implement", status="succeeded", result="L'écriture du fichier a été refusée (permissions)."),
+            MissionStep(index=2, title="Ship", status="succeeded", result="Rien n'a été réellement créé ni committé."),
+        ],
+    )
+    v = run_verification(m)
+    assert v["checks"]["no_blocked_steps"] is False
+    assert v["verified"] is False
+
+
+def test_mission_engine_fails_instead_of_succeeding_when_steps_are_blocked(store):
+    """End-to-end version of the check above: MissionEngine._finish() must
+    gate the final status on verification, not just checkpoint whatever
+    non-empty text each step produced (this used to report MISSION
+    TERMINÉE even though nothing was actually done)."""
+    system = FakeSystem([
+        "Les commandes git sont bloquées par les permissions sur ce chemin.",
+        "Rien n'a été réellement créé : l'écriture a été refusée.",
+    ])
+    messages = []
+    engine = MissionEngine(
+        store, system,
+        notifier=lambda target, title, msg: messages.append((target, title, msg)),
+    )
+    engine.start()
+    try:
+        mission = engine.launch(
+            "Ajoute des tests",
+            steps=[
+                MissionStep(index=0, title="Setup", prompt="Fais 1"),
+                MissionStep(index=1, title="Ship", prompt="Fais 2"),
+            ],
+            requested_by="telegram:1",
+        )
+        assert _wait_until(lambda: engine.status(mission.mission_id).is_terminal)
+        done = engine.status(mission.mission_id)
+        assert done.status == MissionStatus.FAILED.value
+        assert done.verification["verified"] is False
+        assert done.verification["checks"]["no_blocked_steps"] is False
+        # Every step still shows succeeded (the LLM did respond) -- it's
+        # the mission-level status that must reflect the real outcome.
+        assert [s.status for s in done.steps] == ["succeeded", "succeeded"]
+        assert _wait_until(lambda: bool(messages))
+        assert messages[-1][1] == "MISSION NON VÉRIFIÉE"
+    finally:
+        engine.stop()
+
+
 # ---------------------------------------------------------------------------
 # Engine — launch, execute, events, resume-after-crash
 # ---------------------------------------------------------------------------
@@ -383,7 +445,7 @@ def _mission_with_capability(mission_id, capability, n_steps=2):
 
 
 def test_missing_capability_sets_waiting_for_worker(store, event_bus):
-    system = FakeSystem(["r0", "r1"])
+    system = FakeSystem(["Résultat détaillé de l'étape 0.", "Résultat détaillé de l'étape 1."])
     engine = MissionEngine(store, system, event_bus=event_bus)
     engine.start()
     try:
@@ -410,7 +472,7 @@ def test_missing_capability_sets_waiting_for_worker(store, event_bus):
 
 
 def test_capability_registered_resumes_mission(store):
-    system = FakeSystem(["r0", "r1"])
+    system = FakeSystem(["Résultat détaillé de l'étape 0.", "Résultat détaillé de l'étape 1."])
     engine = MissionEngine(store, system)
     engine.start()
     try:
@@ -435,7 +497,7 @@ def test_capability_registered_resumes_mission(store):
 
 
 def test_steps_without_capability_never_wait(store):
-    system = FakeSystem(["r0", "r1"])
+    system = FakeSystem(["Résultat détaillé de l'étape 0.", "Résultat détaillé de l'étape 1."])
     engine = MissionEngine(store, system, worker_capabilities=["terminal"])
     engine.start()
     try:
@@ -457,7 +519,7 @@ def test_config_accepts_worker_capabilities():
 
 def test_notify_includes_report_link(store):
     messages = []
-    system = FakeSystem(["r0", "r1"])
+    system = FakeSystem(["Résultat détaillé de l'étape 0.", "Résultat détaillé de l'étape 1."])
     engine = MissionEngine(
         store,
         system,

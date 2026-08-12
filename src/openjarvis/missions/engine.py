@@ -588,21 +588,52 @@ class MissionEngine:
     # -- completion -----------------------------------------------------------
 
     def _finish(self, mission: Mission) -> None:
+        # Provisionally SUCCEEDED so run_verification's "terminal_status_has_
+        # report" check evaluates correctly; reverted below if verification
+        # fails. Found live (2026-08-12): every coding_pr_steps phase can
+        # honestly report being blocked/refused, get checkpointed
+        # "succeeded" anyway (non-empty text is not proof of real work),
+        # and the mission used to report MISSION TERMINÉE regardless --
+        # verification existed but was purely advisory metadata, never a
+        # gate on the actual status. It gates now.
         mission.status = MissionStatus.SUCCEEDED.value
         mission.report = _build_report(mission)
         mission.verification = run_verification(mission)
+        verified = bool(mission.verification.get("verified"))
+
+        if not verified:
+            mission.status = MissionStatus.FAILED.value
+            self._store.save_mission(mission)
+            self._append_event(
+                mission.mission_id,
+                "failed_verification",
+                {"checks": mission.verification.get("checks")},
+            )
+            self._publish(
+                EventType.MISSION_FAILED,
+                {"mission_id": mission.mission_id, "verified": False},
+            )
+            self._notify(
+                mission,
+                title="MISSION NON VÉRIFIÉE",
+                message=(
+                    "Toutes les étapes ont répondu, mais la vérification "
+                    "anti-hallucination a échoué (au moins une étape "
+                    "rapporte un blocage réel ou une preuve manquante) -- "
+                    "voir le rapport avant de considérer ceci comme fait."
+                ),
+            )
+            return
+
         self._store.save_mission(mission)
         self._append_event(
             mission.mission_id,
             "succeeded",
-            {"verified": mission.verification.get("verified")},
+            {"verified": True},
         )
         self._publish(
             EventType.MISSION_END,
-            {
-                "mission_id": mission.mission_id,
-                "verified": mission.verification.get("verified"),
-            },
+            {"mission_id": mission.mission_id, "verified": True},
         )
         self._notify(mission, title="MISSION TERMINÉE")
 

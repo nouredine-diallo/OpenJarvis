@@ -41,6 +41,7 @@ def run_verification(mission: Mission) -> Dict[str, Any]:
         "step_count_within_budget": len(mission.steps) <= mission.max_steps,
         "budget_respected": mission.budget_used_tokens <= mission.max_budget_tokens,
         "no_unproven_claims": _no_unproven_claims(mission),
+        "no_blocked_steps": _no_blocked_steps(mission),
     }
 
     verified = all(checks.values())
@@ -64,10 +65,50 @@ def _no_unproven_claims(mission: Mission) -> bool:
     claims = re.findall(r"(j'ai|j ai|je (?:suis|serai|vais)|fini|terminé|done)", mission.report.lower())
     if not claims:
         return True
-    # Every explicit claim keyword must be backed by at least one word of
-    # step result evidence; otherwise we cannot prove it -> flag it.
-    meaningful = any(len(tok) > 20 for tok in evidence.split()) if evidence else False
-    return bool(evidence.strip()) and meaningful
+    # Every explicit claim keyword must be backed by *some* real step-result
+    # substance; otherwise we cannot prove it -> flag it. Was checking for a
+    # single token >20 chars, which is nonsensical for French/English (real
+    # sentences are made of many short/medium words, not one long one) --
+    # found live: it flagged "Premier résultat.\nSecond résultat." as
+    # unproven. Total evidence length is a saner, still-conservative proxy.
+    meaningful = len(evidence.strip()) >= 20
+    return meaningful
+
+
+_BLOCKED_RE = re.compile(
+    r"bloqu\w+ par les permissions|"
+    r"a été refusé\w*|a ete refuse\w*|"
+    r"n'a pas pu être créé|n'a pas pu etre cree|"
+    r"je ne peux pas continuer sans autorisation|"
+    r"rien n'a (?:été|ete) (?:réellement |reellement )?créé|"
+    r"aucun\w* .{0,25}n'existe|"
+    r"rien à reviewer|rien a reviewer|"
+    r"requiert une approbation explicite qui n'est pas accordée",
+    re.IGNORECASE,
+)
+
+
+def _no_blocked_steps(mission: Mission) -> bool:
+    """Anti-hallucination check: a step whose own text says it was
+    blocked/refused/couldn't do the actual work must not let the mission
+    report overall success just because it produced non-empty text.
+
+    Found live (2026-08-12): every coding_pr_steps phase honestly reported
+    hitting a permissions/sandbox restriction ("les commandes git sont
+    bloquées par les permissions", "l'écriture a été refusée",
+    "rien n'a été réellement créé...") -- each got checkpointed
+    ``succeeded`` anyway because :meth:`MissionEngine._ask_step` only
+    checks for *non-empty* text, and the mission would have reported
+    MISSION TERMINÉE with zero real work done had this check not existed.
+    Deliberately conservative like :func:`_no_unproven_claims`: a step
+    honestly admitting failure is exactly the signal this must catch.
+    """
+    for step in mission.steps:
+        if step.status != MissionStepStatus.SUCCEEDED.value:
+            continue
+        if _BLOCKED_RE.search(step.result or ""):
+            return False
+    return True
 
 
 __all__ = ["run_verification"]
