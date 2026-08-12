@@ -416,7 +416,9 @@ class MissionEngine:
             # single-mega-step version of Phase 5.
             prompt = self._with_step_context(mission, step, prompt)
 
+        heavy_already_tried = False
         if getattr(step, "prefer_heavy", False) and self._heavy_agents:
+            heavy_already_tried = True
             content = self._try_heavy_agents(prompt)
             if content is not None:
                 return content
@@ -424,22 +426,35 @@ class MissionEngine:
             # a soft preference must never fail a step just because every
             # frontier tier was unavailable or over budget.
 
-        if is_coding and self._coding_agent is not None:
-            result = self._coding_agent.run(prompt)
-            content = getattr(result, "content", None) or ""
-            if not str(content).strip():
-                raise RuntimeError("Coding step returned an empty result")
+        try:
+            if is_coding and self._coding_agent is not None:
+                result = self._coding_agent.run(prompt)
+                content = getattr(result, "content", None) or ""
+                if not str(content).strip():
+                    raise RuntimeError("Coding step returned an empty result")
+                return str(content)
+            if self._system is None:
+                raise RuntimeError("MissionEngine has no system to execute steps with")
+            result = self._system.ask(
+                prompt,
+                context=False,
+            )
+            content = (result or {}).get("content", "")
+            if not content or not str(content).strip():
+                raise RuntimeError("Step returned an empty result")
             return str(content)
-        if self._system is None:
-            raise RuntimeError("MissionEngine has no system to execute steps with")
-        result = self._system.ask(
-            prompt,
-            context=False,
-        )
-        content = (result or {}).get("content", "")
-        if not content or not str(content).strip():
-            raise RuntimeError("Step returned an empty result")
-        return str(content)
+        except Exception:
+            # Last-resort fallback for *every* step, not just prefer_heavy
+            # ones: a quota-exhausted or down default provider (observed in
+            # practice -- Groq's free-tier daily token cap) must not fail a
+            # step outright when a frontier subscription tier could still
+            # answer it. Skipped if prefer_heavy already tried the same
+            # agents above (avoids a redundant, already-failing call).
+            if not heavy_already_tried and self._heavy_agents:
+                content = self._try_heavy_agents(prompt)
+                if content is not None:
+                    return content
+            raise
 
     def _try_heavy_agents(self, prompt: str) -> Optional[str]:
         """Best-effort call across the frontier tiers, in order (e.g. Claude

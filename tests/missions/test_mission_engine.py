@@ -647,6 +647,28 @@ def test_prefer_heavy_tries_multiple_agents_in_order(store):
         engine.stop()
 
 
+def test_default_provider_failure_falls_back_to_heavy_agent(store):
+    """A step with NO prefer_heavy still recovers if the default provider
+    (system.ask -- e.g. Groq out of daily quota) fails: the frontier tier
+    is tried as a last resort rather than failing the step outright."""
+    system = FakeSystem(fail_substrings=("Fais",))
+    heavy = FakeHeavyAgent(output="Réponse du tier de secours.")
+    engine = MissionEngine(store, system, heavy_agent=heavy)
+    engine.start()
+    try:
+        mission = engine.launch(
+            "Mission",
+            steps=[MissionStep(index=0, title="S", prompt="Fais quelque chose")],
+        )
+        assert _wait_until(lambda: engine.status(mission.mission_id).is_terminal)
+        done = engine.status(mission.mission_id)
+        assert done.status == MissionStatus.SUCCEEDED.value
+        assert len(heavy.calls) >= 1
+        assert "tier de secours" in done.steps[0].result
+    finally:
+        engine.stop()
+
+
 def test_coding_pr_mission_runs_5_checkpointed_steps(store):
     """kind='coding_pr' auto-plans 5 steps instead of one mega-step, and the
     engine checkpoints (saves) the mission after each one succeeds."""
