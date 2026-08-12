@@ -239,11 +239,28 @@ class ClaudeSubscriptionAgent(BaseAgent):
             )
 
         if proc.returncode != 0:
-            stderr = (proc.stderr or "").strip()[:500] or "Unknown error"
-            logger.error("claude CLI exited with code %d: %s", proc.returncode, stderr)
+            # `claude -p ... --output-format json` prints its error object to
+            # stdout even on a non-zero exit (observed live: a same-day
+            # failure logged "Unknown error" with empty stderr because this
+            # branch never looked at stdout). Prefer that structured detail.
+            detail = ""
+            try:
+                err_data = json.loads(proc.stdout) if proc.stdout else {}
+                err_obj = err_data.get("error") if isinstance(err_data, dict) else None
+                if isinstance(err_obj, dict):
+                    detail = str(err_obj.get("message") or err_obj.get("type") or "")
+                elif err_obj:
+                    detail = str(err_obj)
+            except json.JSONDecodeError:
+                pass
+            if not detail:
+                detail = (proc.stderr or "").strip()[:500]
+            if not detail:
+                detail = f"Unknown error (exit code {proc.returncode}, no stdout/stderr)"
+            logger.error("claude CLI exited with code %d: %s", proc.returncode, detail)
             self._emit_turn_end(turns=1, error=True)
             return AgentResult(
-                content=f"Claude subscription agent failed: {stderr}",
+                content=f"Claude subscription agent failed: {detail}",
                 turns=1,
                 metadata={"error": True, "returncode": proc.returncode},
             )

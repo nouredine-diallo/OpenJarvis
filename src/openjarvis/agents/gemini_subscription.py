@@ -102,6 +102,24 @@ class GeminiSubscriptionAgent(BaseAgent):
         self._timeout = timeout
         self._gemini_bin = gemini_bin or find_gemini_bin()
 
+    def _exec_env(self) -> dict:
+        """Environment for the subprocess, with the gemini binary's own
+        directory prepended to PATH.
+
+        Found live: ``gemini`` is a Node shebang script (``#!/usr/bin/env
+        node``), unlike ``claude`` which is a self-contained binary. A
+        systemd service's minimal PATH (no nvm/volta dir) resolves
+        ``self._gemini_bin`` to a full, correct path via
+        :func:`find_gemini_bin`, but execve still fails at the shebang's
+        own ``env node`` lookup -- confirmed via the exact error
+        (``/usr/bin/env: 'node': No such file or directory``) and by
+        reproducing/fixing it with this exact PATH prepend.
+        """
+        env = dict(os.environ)
+        bin_dir = str(Path(self._gemini_bin).resolve().parent)
+        env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+        return env
+
     def run(
         self,
         input: str,
@@ -142,6 +160,7 @@ class GeminiSubscriptionAgent(BaseAgent):
                 capture_output=True,
                 text=True,
                 timeout=self._timeout,
+                env=self._exec_env(),
             )
         except subprocess.TimeoutExpired:
             self._emit_turn_end(turns=1, error=True)
