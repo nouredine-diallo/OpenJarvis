@@ -643,6 +643,8 @@ def serve(
                         "file_read",
                         "file_write",
                         "code_interpreter",
+                        "web_search",
+                        "knowledge_search",
                     ):
                         try:
                             from openjarvis.core.registry import ToolRegistry

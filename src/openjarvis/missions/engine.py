@@ -154,13 +154,17 @@ class MissionEngine:
 
         ``kind="coding_pr"`` auto-plans the mission as 5 checkpointed steps
         (setup / implement / test / review / ship) instead of one mega-step —
-        see :func:`coding_pr_steps`. Ignored if ``steps`` is given explicitly.
+        see :func:`coding_pr_steps`. ``kind="research"`` auto-plans a sourced,
+        cross-checked research mission as 3 checkpointed steps — see
+        :func:`research_steps`. Both ignored if ``steps`` is given explicitly.
         """
         goal = (goal or "").strip()
         if not goal:
             raise ValueError("A mission needs a goal")
         if steps is None and kind == "coding_pr":
             steps = coding_pr_steps(goal)
+        elif steps is None and kind == "research":
+            steps = research_steps(goal)
         mission = Mission(
             mission_id=uuid.uuid4().hex[:16],
             goal=goal,
@@ -688,6 +692,57 @@ def coding_pr_steps(goal: str) -> List[MissionStep]:
     ]
 
 
+def research_steps(goal: str) -> List[MissionStep]:
+    """Checkpointed 3-phase plan for a sourced, cross-checked research mission
+    (spec §5/§26/§34: multi-hop, cross-check, contradictions, primary
+    sources, argued conclusion). Same rationale as ``coding_pr_steps``: each
+    phase is a separate orchestrator call with its own turn budget and its
+    own checkpoint, instead of one call expected to search, verify, and
+    write up in a single pass.
+    """
+    phases = [
+        (
+            "Recherche",
+            "Étape 1/3 (Recherche). Utilise `web_search`/`knowledge_search` "
+            "pour rassembler des sources concrètes sur le sujet (plusieurs "
+            "requêtes si besoin, plusieurs sources). Pour chaque élément "
+            "trouvé, note la source (titre/URL). Ne conclus rien encore. "
+            "Termine en listant les sources trouvées et ce que chacune dit.",
+            False,
+        ),
+        (
+            "Vérification croisée",
+            "Étape 2/3 (Vérification croisée). Sur les sources de l'étape "
+            "précédente : identifie les faits confirmés par plusieurs "
+            "sources indépendantes, les contradictions entre sources, et ce "
+            "qui n'est qu'une opinion/non confirmé. Distingue sources "
+            "primaires et secondaires. Termine par la liste des points "
+            "solides et des points incertains/contradictoires.",
+            False,
+        ),
+        (
+            "Synthèse",
+            "Étape 3/3 (Synthèse). Rédige la réponse finale argumentée : "
+            "conclusion claire, recommandation si pertinent, sources citées, "
+            "incertitudes/contradictions signalées explicitement plutôt que "
+            "lissées. Ne jamais affirmer plus que ce que les sources "
+            "soutiennent réellement.",
+            True,  # prefer_heavy: synthesizing conflicting sources into a
+            # calibrated, well-argued answer benefits from the frontier
+            # tier the same way code review does.
+        ),
+    ]
+    return [
+        MissionStep(
+            index=i,
+            title=title,
+            prompt=f"Mission : {goal}\n\n{body}",
+            prefer_heavy=prefer_heavy,
+        )
+        for i, (title, body, prefer_heavy) in enumerate(phases)
+    ]
+
+
 def _build_report(mission: Mission) -> str:
     lines = [
         f"# Rapport de mission — {mission.mission_id}",
@@ -715,6 +770,7 @@ __all__ = [
     "MissionEngine",
     "_default_steps",
     "coding_pr_steps",
+    "research_steps",
     "_build_report",
     "_estimate_tokens",
 ]

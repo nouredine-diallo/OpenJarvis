@@ -17,7 +17,12 @@ from openjarvis.missions import (
     MissionStore,
     MissionStatus,
 )
-from openjarvis.missions.engine import _build_report, _default_steps, coding_pr_steps
+from openjarvis.missions.engine import (
+    _build_report,
+    _default_steps,
+    coding_pr_steps,
+    research_steps,
+)
 from openjarvis.missions.types import Mission, MissionEvent, MissionStep
 from openjarvis.missions.verifier import run_verification
 
@@ -665,6 +670,32 @@ def test_default_provider_failure_falls_back_to_heavy_agent(store):
         assert done.status == MissionStatus.SUCCEEDED.value
         assert len(heavy.calls) >= 1
         assert "tier de secours" in done.steps[0].result
+    finally:
+        engine.stop()
+
+
+def test_research_steps_plan_shape():
+    steps = research_steps("Quelle est la meilleure architecture pour X ?")
+    assert [s.title for s in steps] == ["Recherche", "Vérification croisée", "Synthèse"]
+    assert [s.index for s in steps] == [0, 1, 2]
+    # Only the final synthesis prefers the frontier tier.
+    assert [s.prefer_heavy for s in steps] == [False, False, True]
+    assert all(s.required_capabilities == [] for s in steps)
+    assert all("meilleure architecture" in s.prompt for s in steps)
+
+
+def test_research_mission_runs_3_checkpointed_steps(store):
+    system = FakeSystem(["Sources trouvées.", "Points confirmés/contradictoires.", "Réponse finale."])
+    engine = MissionEngine(store, system)
+    engine.start()
+    try:
+        mission = engine.launch("Quel est le meilleur ORM Python ?", kind="research")
+        assert len(mission.steps) == 3
+        assert _wait_until(lambda: engine.status(mission.mission_id).is_terminal)
+        done = engine.status(mission.mission_id)
+        assert done.status == MissionStatus.SUCCEEDED.value
+        assert [s.status for s in done.steps] == ["succeeded"] * 3
+        assert len(system.calls) == 3
     finally:
         engine.stop()
 

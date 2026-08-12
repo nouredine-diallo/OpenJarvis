@@ -44,15 +44,20 @@ class LaunchMissionTool(BaseTool):
                     },
                     "kind": {
                         "type": "string",
-                        "enum": ["default", "coding_pr"],
+                        "enum": ["default", "coding_pr", "research"],
                         "description": (
                             "'coding_pr' auto-plans a coding mission that "
                             "ends in an open PR as 5 checkpointed steps "
-                            "(setup/implement/test/review/ship) instead of "
-                            "one big step -- use this for any request that "
-                            "implies writing code, fixing a bug, or opening "
-                            "a PR. 'default' (or omitted) for everything "
-                            "else (research, single-shot tasks)."
+                            "(setup/implement/test/review/ship) -- use for "
+                            "any request that implies writing code, fixing "
+                            "a bug, or opening a PR. 'research' auto-plans a "
+                            "sourced, cross-checked research mission as 3 "
+                            "checkpointed steps (search/cross-check/"
+                            "synthesize with citations) -- use for "
+                            "'find out X', 'compare X and Y', 'what's the "
+                            "best approach for X' style requests. 'default' "
+                            "(or omitted) for single-shot tasks that are "
+                            "neither."
                         ),
                     },
                     "autonomy_level": {

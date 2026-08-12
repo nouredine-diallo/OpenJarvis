@@ -52,8 +52,9 @@ async def create_mission(body: _MissionIn, request: Request):
     """Launch a mission asynchronously. Returns 202 + mission_id.
 
     ``kind="coding_pr"`` auto-plans a coding mission as 5 checkpointed steps
-    (setup/implement/test/review/ship) instead of one mega-step; ignored if
-    ``steps`` is given explicitly.
+    (setup/implement/test/review/ship); ``kind="research"`` auto-plans a
+    sourced research mission as 3 checkpointed steps (search/cross-check/
+    synthesize). Both ignored if ``steps`` is given explicitly.
     """
     engine = _engine(request)
     steps = None
