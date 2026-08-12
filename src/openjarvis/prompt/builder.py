@@ -208,6 +208,13 @@ class SystemPromptBuilder:
             path_str=self._mf_config.user_path,
             max_chars=self._sp_config.user_max_chars,
         )
+        self._append_file_section(
+            sections=sections,
+            name="personal_context",
+            heading="Personal Context",
+            path_str=self._mf_config.personal_context_path,
+            max_chars=self._sp_config.memory_max_chars,
+        )
         return sections
 
     def _append_file_section(
@@ -285,6 +292,7 @@ class SystemPromptBuilder:
             soul_path=str(base / "SOUL.md"),
             memory_path=str(base / "MEMORY.md"),
             user_path=str(base / "USER.md"),
+            personal_context_path=mf.personal_context_path,
             nudge_interval=mf.nudge_interval,
             persona_name=name,
         )

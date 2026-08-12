@@ -35,7 +35,32 @@ _LISTENING_RE = re.compile(r"listening on\s+(https?://\S+)", re.IGNORECASE)
 
 def is_opencode_available() -> bool:
     """Return True if the ``opencode`` binary is on PATH."""
-    return shutil.which("opencode") is not None
+    return shutil.which("opencode") is not None or Path(
+        _find_opencode_bin()
+    ).exists()
+
+
+def _find_opencode_bin() -> str:
+    """Locate the ``opencode`` binary, including non-PATH installs.
+
+    systemd user services run with a minimal PATH, so ``opencode`` installed
+    under ``~/.opencode/bin`` (npm) or ``~/.local/bin`` is often invisible to
+    ``shutil.which``. Search the common locations before giving up.
+    """
+    found = shutil.which("opencode")
+    if found:
+        return found
+    home = Path.home()
+    candidates = [
+        home / ".opencode" / "bin" / "opencode",
+        home / ".local" / "bin" / "opencode",
+        home / ".npm-global" / "bin" / "opencode",
+        Path("/usr/local/bin/opencode"),
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return "opencode"
 
 
 def _derive_openai_base_url(engine: Any) -> str:
@@ -157,7 +182,7 @@ class OpenCodeAgent(BaseAgent):
             "OPENCODE_SERVER_PASSWORD", ""
         )
         self._timeout = timeout
-        self._opencode_bin = opencode_bin or shutil.which("opencode") or "opencode"
+        self._opencode_bin = opencode_bin or _find_opencode_bin()
         self._proc: Optional[subprocess.Popen] = None
         self._base: str = ""
         self._config_dir: Optional[str] = None
@@ -204,7 +229,7 @@ class OpenCodeAgent(BaseAgent):
         """Spawn ``opencode serve`` (once) and return its base URL."""
         if self._base and self._proc and self._proc.poll() is None:
             return self._base
-        if not is_opencode_available() and not Path(self._opencode_bin).exists():
+        if not Path(self._opencode_bin).exists():
             raise RuntimeError(
                 "OpenCodeAgent requires the 'opencode' binary. Install it with "
                 "`npm i -g opencode-ai` or `brew install anomalyco/tap/opencode` "

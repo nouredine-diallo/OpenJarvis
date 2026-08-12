@@ -27,6 +27,22 @@ def _default_fact_path() -> Path:
     return get_config_dir() / "memory_facts.jsonl"
 
 
+# Memory kinds (spec §6/§8: Préférence ≠ Fait ≠ Décision ≠ Règle).
+KIND_FACT = "fact"
+KIND_PREFERENCE = "preference"
+KIND_DECISION = "decision"
+KIND_RULE = "rule"
+KINDS: tuple = (KIND_FACT, KIND_PREFERENCE, KIND_DECISION, KIND_RULE)
+
+
+def normalize_kind(kind: str | None) -> str:
+    """Return a canonical kind, defaulting unknown/empty to ``"fact"``."""
+    k = (kind or KIND_FACT).strip().lower()
+    if k in KINDS:
+        return k
+    return KIND_FACT
+
+
 @dataclass(slots=True)
 class Fact:
     """A single durable memory entry."""
@@ -34,26 +50,51 @@ class Fact:
     text: str
     source: str = ""
     created_at: float = 0.0
+    kind: str = KIND_FACT
 
 
 class FactStore(ABC):
     """Abstract persistent store for extracted memory facts."""
 
     @abstractmethod
-    def add(self, text: str, source: str = "") -> bool:
-        """Store *text* as a fact. Returns True if a new fact was stored."""
+    def add(self, text: str, source: str = "", kind: str = KIND_FACT) -> bool:
+        """Store *text* as a memory of the given *kind*.
 
-    def add_many(self, texts: Iterable[str], source: str = "") -> int:
-        """Store several facts, returning the count of newly stored ones."""
+        Returns True if a new entry was stored.
+        """
+
+    def add_many(
+        self,
+        texts: Iterable[str],
+        source: str = "",
+        kind: str = KIND_FACT,
+    ) -> int:
+        """Store several entries, returning the count of newly stored ones."""
         added = 0
         for text in texts:
-            if self.add(text, source=source):
+            if self.add(text, source=source, kind=kind):
+                added += 1
+        return added
+
+    def add_facts(
+        self,
+        facts: "Iterable[Fact]",
+        source: str = "",
+    ) -> int:
+        """Store typed entries (kind + text), returning newly stored count.
+
+        *source* is used as a fallback for entries that carry no explicit
+        source of their own.
+        """
+        added = 0
+        for fact in facts:
+            if self.add(fact.text, source=fact.source or source, kind=fact.kind):
                 added += 1
         return added
 
     @abstractmethod
-    def list(self) -> List[Fact]:
-        """Return all stored facts, oldest first."""
+    def list(self, kind: str | None = None) -> List[Fact]:
+        """Return all stored entries, optionally filtered by *kind*."""
 
     @abstractmethod
     def clear(self) -> int:
@@ -113,6 +154,7 @@ class LocalFactStore(FactStore):
                     text=fact_text,
                     source=str(obj.get("source", "")),
                     created_at=float(obj.get("created_at", 0.0) or 0.0),
+                    kind=normalize_kind(obj.get("kind")),
                 )
             )
         return facts
@@ -133,26 +175,32 @@ class LocalFactStore(FactStore):
 
     # -- FactStore API ------------------------------------------------------
 
-    def add(self, text: str, source: str = "") -> bool:
+    def add(self, text: str, source: str = "", kind: str = KIND_FACT) -> bool:
         text = (text or "").strip()
         if not text:
             return False
+        kind = normalize_kind(kind)
         with self._lock:
             self._sync_from_disk_locked()
             lowered = text.lower()
             if any(f.text.lower() == lowered for f in self._facts):
                 return False  # dedupe
-            self._facts.append(Fact(text=text, source=source, created_at=time.time()))
+            self._facts.append(
+                Fact(text=text, source=source, created_at=time.time(), kind=kind)
+            )
             # Enforce the cap by evicting the oldest entries.
             if self._max_facts and len(self._facts) > self._max_facts:
                 self._facts = self._facts[-self._max_facts :]
             self._flush()
         return True
 
-    def list(self) -> List[Fact]:
+    def list(self, kind: str | None = None) -> List[Fact]:
         with self._lock:
             self._sync_from_disk_locked()
-            return list(self._facts)
+            if kind is None:
+                return list(self._facts)
+            k = normalize_kind(kind)
+            return [f for f in self._facts if f.kind == k]
 
     def clear(self) -> int:
         with self._lock:
@@ -205,4 +253,15 @@ def create_fact_store(
     return FactStoreRegistry.create(key, path, max_facts=max_facts)
 
 
-__all__ = ["Fact", "FactStore", "LocalFactStore", "create_fact_store"]
+__all__ = [
+    "Fact",
+    "FactStore",
+    "LocalFactStore",
+    "create_fact_store",
+    "KIND_FACT",
+    "KIND_PREFERENCE",
+    "KIND_DECISION",
+    "KIND_RULE",
+    "KINDS",
+    "normalize_kind",
+]

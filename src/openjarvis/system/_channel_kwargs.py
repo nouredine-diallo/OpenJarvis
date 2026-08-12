@@ -9,6 +9,8 @@ def _telegram(c: Any) -> Dict[str, Any]:
     kw: Dict[str, Any] = {}
     if c.bot_token:
         kw["bot_token"] = c.bot_token
+    if c.allowed_chat_ids:
+        kw["allowed_chat_ids"] = c.allowed_chat_ids
     if c.parse_mode:
         kw["parse_mode"] = c.parse_mode
     return kw

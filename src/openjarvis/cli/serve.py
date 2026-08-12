@@ -187,6 +187,7 @@ def serve(
         or os.environ.get("GEMINI_API_KEY")
         or os.environ.get("GOOGLE_API_KEY")
         or os.environ.get("OPENROUTER_API_KEY")
+        or os.environ.get("GROQ_API_KEY")
     )
     if _has_cloud and engine_name != "cloud":
         try:
@@ -515,6 +516,160 @@ def serve(
         logger.debug("Memory service init failed: %s", exc)
         memory_service = None
 
+    # Mission Engine asynchrone persistant (Phase 4 / D10).  Reuses the
+    # channel JarvisSystem (or the agent-scheduler system) to execute steps,
+    # persists each step as a checkpoint, and resumes in-flight missions after
+    # a crash.
+    mission_engine = None
+    if config.missions.enabled:
+        try:
+            from openjarvis.missions import MissionEngine, MissionStore
+
+            def _default_worker_caps() -> list[str]:
+                """Capabilities of the PC worker (D12: disposable worker)."""
+                return [
+                    "terminal",
+                    "docker",
+                    "browser",
+                    "coding",
+                    "tests",
+                    "preview",
+                ]
+
+            _missions_system = locals().get("_wire_system") or locals().get("system")
+
+            def _mission_notifier(target: str, title: str, message: str) -> None:
+                if channel_bridge is None or not target:
+                    return
+                _type, _sep, _dest = target.partition(":")
+                if not _sep or not _dest:
+                    return
+                try:
+                    channel_bridge.send(_dest, f"{title}\n\n{message}")
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Mission Telegram notify failed: %s", exc)
+
+            _mdb = config.missions.db_path or str(get_config_dir() / "missions.db")
+
+            # Phase 5: coding steps dispatch to a dedicated coding agent
+            # (OpenCodeAgent) when a local OpenAI-compatible engine is present
+            # (ollama/vllm/…). Cloud engines have no HTTP host here (and Groq's
+            # free TPM cannot fit opencode's ~40k-token base prompt), so we fall
+            # back to the orchestrator — which must then be given the coding
+            # tools (shell, files, code interpreter) so it actually executes.
+            _coding_agent = None
+            try:
+                from openjarvis.agents.opencode import (
+                    OpenCodeAgent,
+                    _derive_openai_base_url,
+                )
+
+                _base_url = _derive_openai_base_url(engine)
+                if _base_url:
+                    _coding_agent = OpenCodeAgent(
+                        engine,
+                        model_name or "default",
+                        agent="build",
+                        workspace=os.getcwd(),
+                    )
+                    console.print("  Coding agent: [cyan]opencode[/cyan]")
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Coding agent init failed: %s", exc)
+
+            # Missions orchestrator: reuse the wired channel system only when it
+            # already carries coding tools; otherwise build a dedicated
+            # JarvisSystem that has the shell/file/interpreter tools coding
+            # steps need. This keeps Telegram channels tool-limited while
+            # mission steps can actually execute.
+            def _has_mission_tools(sys_: Any) -> bool:
+                if sys_ is None:
+                    return False
+                for _t in getattr(sys_, "tools", None) or []:
+                    if getattr(_t, "name", "") == "shell_exec":
+                        return True
+                return False
+
+            if _coding_agent is None and not _has_mission_tools(_missions_system):
+                try:
+                    from openjarvis.system import JarvisSystem
+
+                    _mission_tools: list = []
+                    for _tname in (
+                        "shell_exec",
+                        "file_read",
+                        "file_write",
+                        "code_interpreter",
+                    ):
+                        try:
+                            from openjarvis.core.registry import ToolRegistry
+
+                            _tcls = ToolRegistry.get(_tname)
+                            _mission_tools.append(_tcls())
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug("Mission tool %s failed: %s", _tname, exc)
+
+                    # Headless missions: auto-approve tool confirmations for
+                    # steps that passed the required_capabilities gate (D12
+                    # disposable worker), and use the text-protocol tool loop
+                    # ("structured") that cloud engines like Groq accept.
+                    def _auto_approve(_prompt: str) -> bool:
+                        return True
+
+                    _missions_system = JarvisSystem(
+                        config=config,
+                        bus=bus,
+                        engine=engine,
+                        engine_key=engine_name,
+                        model=model_name,
+                        agent_name="orchestrator",
+                        agent_mode="structured",
+                        interactive=config.missions.auto_approve_tools,
+                        confirm_callback=(
+                            _auto_approve
+                            if config.missions.auto_approve_tools
+                            else None
+                        ),
+                        tools=_mission_tools,
+                        mcp_tools=managed_mcp_tools,
+                        _mcp_clients=mcp_clients,
+                    )
+                    console.print(
+                        "  Missions tools: [cyan]shell/files/interpreter[/cyan]"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Missions system build failed: %s", exc)
+
+            mission_engine = MissionEngine(
+                MissionStore(_mdb),
+                _missions_system,
+                event_bus=bus,
+                notifier=_mission_notifier,
+                poll_interval=config.missions.poll_interval,
+                default_autonomy=config.missions.default_autonomy,
+                max_steps=config.missions.max_steps,
+                max_budget_tokens=config.missions.max_budget_tokens,
+                worker_capabilities=config.missions.worker_capabilities or _default_worker_caps(),
+                report_base_url=config.missions.report_base_url,
+                coding_agent=_coding_agent,
+            )
+            mission_engine.start()
+            # Post-build injection so the agent tools (launch_mission,
+            # mission_status) can reach the engine at call time.
+            try:
+                from openjarvis.tools.mission import (  # noqa: F401
+                    LaunchMissionTool,
+                    MissionStatusTool,
+                )
+
+                LaunchMissionTool._mission_engine = mission_engine
+                MissionStatusTool._mission_engine = mission_engine
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Mission tool injection failed: %s", exc)
+            console.print("  Missions: [cyan]active[/cyan]")
+        except Exception as exc:
+            logger.debug("Mission engine init failed: %s", exc)
+            mission_engine = None
+
     # Set up agent manager
     agent_manager = None
     if config.agent_manager.enabled:
@@ -696,6 +851,7 @@ def serve(
         speech_backend=speech_backend,
         agent_manager=agent_manager,
         agent_scheduler=agent_scheduler,
+        mission_engine=mission_engine,
         mcp_tools=managed_mcp_tools,
         mcp_clients=mcp_clients,
         api_key=api_key,

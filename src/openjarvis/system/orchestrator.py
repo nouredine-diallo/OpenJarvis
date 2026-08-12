@@ -158,6 +158,15 @@ class QueryOrchestrator:
             examples = getattr(s, "_skill_few_shot_examples", None)
             if examples:
                 agent_kwargs["skill_few_shot_examples"] = examples
+            # Headless mission context: route tool confirmations to the
+            # system's callback (auto-approve for D12 disposable workers).
+            if getattr(s, "interactive", False):
+                agent_kwargs["interactive"] = True
+                agent_kwargs["confirm_callback"] = getattr(
+                    s, "confirm_callback", None
+                )
+            if getattr(s, "agent_mode", ""):
+                agent_kwargs["mode"] = s.agent_mode
         if system_prompt is not None:
             agent_kwargs["system_prompt"] = system_prompt
         if s.capability_policy is not None:

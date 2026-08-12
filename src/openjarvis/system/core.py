@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from openjarvis.core.config import JarvisConfig
 from openjarvis.core.events import EventBus
@@ -89,6 +89,13 @@ class JarvisSystem:
     # Keep newly added fields after every pre-existing positional field so
     # older positional JarvisSystem(...) calls retain their original meaning.
     mcp_tools: List[BaseTool] = field(default_factory=list)
+    # Mission/headless context: when set, tool confirmations are routed to
+    # ``confirm_callback`` (auto-approve for D12 disposable-worker missions).
+    interactive: bool = False
+    confirm_callback: Optional[Callable[[str], bool]] = None
+    # Agent mode override (e.g. "structured" for cloud engines like Groq whose
+    # OpenAI-compatible tool validation rejects text-protocol tool calls).
+    agent_mode: str = ""
 
     @property
     def security(self) -> SecurityContext:
@@ -268,6 +275,20 @@ class JarvisSystem:
                 )
             except Exception:
                 logger.debug("Session save error", exc_info=True)
+
+            # Feed the automatic long-term memory service (background fact
+            # extraction) so channel conversations are remembered too.
+            try:
+                from openjarvis.memory import publish_completed_exchange
+
+                publish_completed_exchange(
+                    _system.bus,
+                    cm.content,
+                    reply,
+                    source=cm.channel,
+                )
+            except Exception:
+                logger.debug("Memory publish error", exc_info=True)
 
             if reply:
                 try:

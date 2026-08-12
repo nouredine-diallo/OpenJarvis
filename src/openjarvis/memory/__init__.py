@@ -9,6 +9,7 @@ and configured via the ``[memory]`` section of ``config.toml``.
 from __future__ import annotations
 
 from openjarvis.memory.extractor import FactExtractor
+from openjarvis.memory.mirror import memory_mirror_dir, refresh as refresh_mirror
 from openjarvis.memory.service import (
     MemoryService,
     build_memory_service,
@@ -17,8 +18,14 @@ from openjarvis.memory.service import (
 from openjarvis.memory.store import (
     Fact,
     FactStore,
+    KIND_DECISION,
+    KIND_FACT,
+    KIND_PREFERENCE,
+    KIND_RULE,
+    KINDS,
     LocalFactStore,
     create_fact_store,
+    normalize_kind,
 )
 
 __all__ = [
@@ -29,5 +36,13 @@ __all__ = [
     "MemoryService",
     "build_memory_service",
     "create_fact_store",
+    "KIND_FACT",
+    "KIND_PREFERENCE",
+    "KIND_DECISION",
+    "KIND_RULE",
+    "KINDS",
+    "normalize_kind",
+    "memory_mirror_dir",
+    "refresh_mirror",
     "publish_completed_exchange",
 ]

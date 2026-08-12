@@ -101,6 +101,9 @@ class TestAvailability:
 
     def test_false(self, monkeypatch):
         monkeypatch.setattr("openjarvis.agents.opencode.shutil.which", lambda n: None)
+        monkeypatch.setattr(
+            "openjarvis.agents.opencode._find_opencode_bin", lambda: "opencode"
+        )
         assert is_opencode_available() is False
 
 

@@ -23,6 +23,7 @@ from typing import Any, List, Optional
 from openjarvis.core.events import Event, EventBus, EventType
 from openjarvis.memory.extractor import FactExtractor
 from openjarvis.memory.store import Fact, FactStore, create_fact_store
+from openjarvis.memory.mirror import refresh as _refresh_mirror_fn
 
 logger = logging.getLogger(__name__)
 
@@ -157,11 +158,27 @@ class MemoryService:
 
     def _process(self, job: Any) -> None:
         user_text, assistant_text = job
-        facts = self._extractor.extract(user_text, assistant_text)
+        facts = self._extract_facts(user_text, assistant_text)
         if facts:
-            stored = self._store.add_many(facts, source="auto")
+            stored = self._store.add_facts(facts, source="auto")
             if stored:
                 logger.debug("Memory service stored %d new fact(s)", stored)
+                self._refresh_mirror()
+
+    def _extract_facts(self, user_text: str, assistant_text: str) -> List[Fact]:
+        """Run the extractor, tolerating the ``extract`` or ``extract_typed``
+        APIs (older extractors return plain strings, typed ones return facts)."""
+        extractor = self._extractor
+        if hasattr(extractor, "extract_typed"):
+            return list(extractor.extract_typed(user_text, assistant_text))
+        return [Fact(text=text) for text in extractor.extract(user_text, assistant_text)]
+
+    def _refresh_mirror(self) -> None:
+        """Regenerate the Markdown mirror after a store mutation."""
+        try:
+            _refresh_mirror_fn(self._store)
+        except Exception:  # noqa: BLE001
+            logger.debug("Memory mirror refresh failed", exc_info=True)
 
     # -- store passthroughs -------------------------------------------------
 

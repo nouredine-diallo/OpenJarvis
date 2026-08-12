@@ -94,6 +94,15 @@ _DEEPSEEK_MODELS = [
     "deepseek-v4-pro",
 ]
 
+# Groq models — served through Groq's OpenAI-compatible API (free tier).
+_GROQ_MODELS = [
+    "groq/llama-3.3-70b-versatile",
+    "groq/llama-3.1-8b-instant",
+    "groq/qwen/qwen3.6-27b",
+    "groq/openai/gpt-oss-120b",
+    "groq/openai/gpt-oss-20b",
+]
+
 # OpenRouter models — prefixed with "openrouter/" so they can be identified
 _OPENROUTER_POPULAR = [
     "openrouter/auto",
@@ -123,6 +132,10 @@ def _is_minimax_model(model: str) -> bool:
 
 def _is_deepseek_model(model: str) -> bool:
     return model.lower().startswith("deepseek")
+
+
+def _is_groq_model(model: str) -> bool:
+    return model.startswith("groq/")
 
 
 def _is_openrouter_model(model: str) -> bool:
@@ -324,6 +337,7 @@ class CloudEngine(InferenceEngine):
         self._openrouter_client: Any = None
         self._minimax_client: Any = None
         self._deepseek_client: Any = None
+        self._groq_client: Any = None
         self._codex_client: Any = None
         # Gemini thought_signatures: tool_call_id -> signature bytes
         self._thought_sigs: Dict[str, bytes] = {}
@@ -384,6 +398,17 @@ class CloudEngine(InferenceEngine):
                 self._deepseek_client = openai.OpenAI(
                     base_url="https://api.deepseek.com/v1",
                     api_key=deepseek_key,
+                )
+            except ImportError:
+                pass
+        groq_key = os.environ.get("GROQ_API_KEY")
+        if groq_key:
+            try:
+                import openai
+
+                self._groq_client = openai.OpenAI(
+                    base_url="https://api.groq.com/openai/v1",
+                    api_key=groq_key,
                 )
             except ImportError:
                 pass
@@ -987,6 +1012,67 @@ class CloudEngine(InferenceEngine):
             ]
         return result
 
+    def _generate_groq(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        if self._groq_client is None:
+            raise EngineConnectionError(
+                "Groq client not available — set GROQ_API_KEY"
+            )
+        # Strip the "groq/" prefix to get the actual model ID.
+        actual_model = model.removeprefix("groq/")
+        kwargs.pop("response_format", None)
+        create_kwargs: Dict[str, Any] = {
+            "model": actual_model,
+            "messages": messages_to_dicts(messages),
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        # Forward tools / tool_choice (Groq is OpenAI-compatible).
+        tools = kwargs.pop("tools", None)
+        if tools:
+            create_kwargs["tools"] = tools
+        tool_choice = kwargs.pop("tool_choice", None)
+        if tool_choice is not None:
+            create_kwargs["tool_choice"] = tool_choice
+        t0 = time.monotonic()
+        resp = self._groq_client.chat.completions.create(**create_kwargs)
+        elapsed = time.monotonic() - t0
+        choice = resp.choices[0]
+        usage = resp.usage
+        prompt_tokens = usage.prompt_tokens if usage else 0
+        completion_tokens = usage.completion_tokens if usage else 0
+        result: Dict[str, Any] = {
+            "content": choice.message.content or "",
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": (usage.total_tokens if usage else 0),
+            },
+            "model": resp.model,
+            "finish_reason": choice.finish_reason or "stop",
+            "ttft": elapsed,
+        }
+        if getattr(choice.message, "tool_calls", None):
+            result["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": tc.type,
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                }
+                for tc in choice.message.tool_calls
+            ]
+        return result
+
     def _generate_minimax(
         self,
         messages: Sequence[Message],
@@ -1109,6 +1195,8 @@ class CloudEngine(InferenceEngine):
             return self._generate_codex(messages, **kw)
         if _is_openrouter_model(model):
             return self._generate_openrouter(messages, **kw)
+        if _is_groq_model(model):
+            return self._generate_groq(messages, **kw)
         if _is_minimax_model(model):
             return self._generate_minimax(messages, **kw)
         if _is_deepseek_model(model):
@@ -1139,6 +1227,9 @@ class CloudEngine(InferenceEngine):
                 yield token
         elif _is_openrouter_model(model):
             async for token in self._stream_openrouter(messages, **kw):
+                yield token
+        elif _is_groq_model(model):
+            async for token in self._stream_groq(messages, **kw):
                 yield token
         elif _is_minimax_model(model):
             async for token in self._stream_minimax(messages, **kw):
@@ -1492,6 +1583,38 @@ class CloudEngine(InferenceEngine):
             if delta and delta.content:
                 yield delta.content
 
+    async def _stream_groq(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        **kwargs: Any,
+    ) -> AsyncIterator[str]:
+        if self._groq_client is None:
+            raise EngineConnectionError("Groq client not available")
+        actual_model = model.removeprefix("groq/")
+        create_kwargs: Dict[str, Any] = {
+            "model": actual_model,
+            "messages": messages_to_dicts(messages),
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": True,
+        }
+        # Forward tools / tool_choice (Groq is OpenAI-compatible).
+        tools = kwargs.pop("tools", None)
+        if tools:
+            create_kwargs["tools"] = tools
+        tool_choice = kwargs.pop("tool_choice", None)
+        if tool_choice is not None:
+            create_kwargs["tool_choice"] = tool_choice
+        resp = self._groq_client.chat.completions.create(**create_kwargs)
+        for chunk in resp:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if delta and delta.content:
+                yield delta.content
+
     async def _stream_minimax(
         self,
         messages: Sequence[Message],
@@ -1775,6 +1898,8 @@ class CloudEngine(InferenceEngine):
             models.extend(_MINIMAX_MODELS)
         if self._deepseek_client is not None:
             models.extend(_DEEPSEEK_MODELS)
+        if self._groq_client is not None:
+            models.extend(_GROQ_MODELS)
         if self._codex_client is not None:
             models.extend(_CODEX_MODELS)
         return models
@@ -1796,6 +1921,8 @@ class CloudEngine(InferenceEngine):
             return self._codex_client
         if _is_openrouter_model(model):
             return self._openrouter_client
+        if _is_groq_model(model):
+            return self._groq_client
         if _is_minimax_model(model):
             return self._minimax_client
         if _is_deepseek_model(model):
@@ -1829,6 +1956,7 @@ class CloudEngine(InferenceEngine):
             or self._openrouter_client is not None
             or self._minimax_client is not None
             or self._deepseek_client is not None
+            or self._groq_client is not None
             or self._codex_client is not None
         )
 
@@ -1851,6 +1979,10 @@ class CloudEngine(InferenceEngine):
             if hasattr(self._minimax_client, "close"):
                 self._minimax_client.close()
             self._minimax_client = None
+        if self._groq_client is not None:
+            if hasattr(self._groq_client, "close"):
+                self._groq_client.close()
+            self._groq_client = None
         if self._codex_client is not None:
             self._codex_client = None
 

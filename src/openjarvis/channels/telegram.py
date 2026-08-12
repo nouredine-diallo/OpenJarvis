@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import textwrap
@@ -172,7 +173,7 @@ class TelegramChannel(BaseChannel):
 
             app = ApplicationBuilder().token(self._token).build()
 
-            def _handle_msg(update, context):
+            async def _handle_msg(update, context):
                 msg = update.message
                 if msg is None:
                     return
@@ -198,7 +199,7 @@ class TelegramChannel(BaseChannel):
                         return
                 for handler in self._handlers:
                     try:
-                        handler(cm)
+                        await asyncio.to_thread(handler, cm)
                     except Exception:
                         logger.exception("Telegram handler error")
                 if self._bus is not None:

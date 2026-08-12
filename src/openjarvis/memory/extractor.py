@@ -16,6 +16,14 @@ import re
 from typing import Any, List, Optional
 
 from openjarvis.core.types import Message, Role
+from openjarvis.memory.store import (
+    Fact,
+    KIND_DECISION,
+    KIND_FACT,
+    KIND_PREFERENCE,
+    KIND_RULE,
+    normalize_kind,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +35,26 @@ _DEFAULT_SYSTEM_PROMPT = (
     "and anything the assistant said about itself.\n\n"
     "Respond with ONLY a JSON array of short fact strings (each under 200 "
     "characters). If there is nothing worth remembering, respond with []."
+)
+
+# Typed extraction (spec §6/§8): each memory is classified as a preference,
+# fact, decision or rule so the 4 stores stay distinct.
+_DEFAULT_TYPED_SYSTEM_PROMPT = (
+    "You maintain the user's long-term memory. From a single conversation "
+    "exchange, extract durable statements worth remembering and classify each "
+    "into EXACTLY one of these kinds:\n"
+    f"- \"{KIND_PREFERENCE}\": a stable user preference or style choice "
+    "(e.g. \"Prefers concise French answers\").\n"
+    f"- \"{KIND_FACT}\": a durable, dated, factual statement about the user "
+    "or their world (identity, projects, relationships, devices).\n"
+    f"- \"{KIND_DECISION}\": a decision made and locked (e.g. \"Chose "
+    "OpenJarvis over jarvis-OS as the base\").\n"
+    f"- \"{KIND_RULE}\": an explicit, executable convention the assistant "
+    "must follow (e.g. \"Never declare a task done without running tests\").\n"
+    "Ignore one-off task details and small talk.\n\n"
+    "Respond with ONLY a JSON array of objects: "
+    '[{"kind": "preference", "text": "..."}] — text under 200 characters. '
+    'If there is nothing worth remembering, respond with [].'
 )
 
 
@@ -43,6 +71,7 @@ class FactExtractor:
         max_facts_per_turn: int = 10,
         max_fact_chars: int = 200,
         system_prompt: Optional[str] = None,
+        typed_system_prompt: Optional[str] = None,
     ) -> None:
         self._engine = engine
         self._model = model
@@ -51,9 +80,18 @@ class FactExtractor:
         self._max_facts_per_turn = max_facts_per_turn
         self._max_fact_chars = max_fact_chars
         self._system_prompt = system_prompt or _DEFAULT_SYSTEM_PROMPT
+        self._typed_system_prompt = typed_system_prompt or _DEFAULT_TYPED_SYSTEM_PROMPT
 
     def extract(self, user_text: str, assistant_text: str = "") -> List[str]:
-        """Return durable facts from the exchange. Never raises."""
+        """Return durable facts (plain strings) from the exchange.
+
+        Delegates to :meth:`extract_typed`; entries classified as facts are
+        returned as their text. Never raises.
+        """
+        return [f.text for f in self.extract_typed(user_text, assistant_text)]
+
+    def extract_typed(self, user_text: str, assistant_text: str = "") -> List[Fact]:
+        """Return typed memory entries (kind + text). Never raises."""
         user_text = (user_text or "").strip()
         if not user_text:
             return []
@@ -63,7 +101,7 @@ class FactExtractor:
             exchange += f"\nAssistant: {assistant_text.strip()}"
 
         messages = [
-            Message(role=Role.SYSTEM, content=self._system_prompt),
+            Message(role=Role.SYSTEM, content=self._typed_system_prompt),
             Message(role=Role.USER, content=exchange),
         ]
 
@@ -75,8 +113,6 @@ class FactExtractor:
                 max_tokens=self._max_tokens,
             )
         except BrokenPipeError:
-            # The classic failure mode: the model call's transport died.
-            # Extraction is best-effort, so swallow it.
             logger.debug("Memory extraction aborted: broken pipe", exc_info=True)
             return []
         except Exception:  # noqa: BLE001 — extraction must never crash the worker
@@ -88,9 +124,37 @@ class FactExtractor:
         else:
             content = str(result)
 
-        return self._parse(content)
+        return self._parse_typed(content)
 
     # -- parsing ------------------------------------------------------------
+
+    def _parse_typed(self, content: str) -> List[Fact]:
+        """Parse model output into typed, deduped, capped memory entries."""
+        if not content or not content.strip():
+            return []
+
+        raw = self._coerce_to_list(content)
+
+        facts: List[Fact] = []
+        seen: set[str] = set()
+        for item in raw:
+            if isinstance(item, dict):
+                kind = normalize_kind(item.get("kind"))
+                text = item.get("text", "")
+            else:
+                kind = KIND_FACT
+                text = str(item)
+            fact_text = self._clean_fact(text)
+            if not fact_text:
+                continue
+            key = fact_text.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            facts.append(Fact(text=fact_text, kind=kind))
+            if len(facts) >= self._max_facts_per_turn:
+                break
+        return facts
 
     def _parse(self, content: str) -> List[str]:
         """Parse model output into a clean, deduped, capped list of facts."""
@@ -123,7 +187,8 @@ class FactExtractor:
             try:
                 parsed = json.loads(match.group(0))
                 if isinstance(parsed, list):
-                    return [str(x) for x in parsed]
+                    # Preserve dict items (typed output) — coerce scalars to str.
+                    return [x if isinstance(x, dict) else str(x) for x in parsed]
             except (json.JSONDecodeError, ValueError):
                 pass
 

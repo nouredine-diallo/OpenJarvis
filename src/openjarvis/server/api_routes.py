@@ -1065,6 +1065,17 @@ def include_all_routes(app) -> None:
     app.include_router(feedback_router)
     app.include_router(optimize_router)
 
+    # Mission Engine routes (if the engine is wired on app.state)
+    try:
+        if hasattr(app.state, "mission_engine") and app.state.mission_engine:
+            from openjarvis.server.missions_routes import (  # noqa: PLC0415
+                router as missions_router,
+            )
+
+            app.include_router(missions_router)
+    except ImportError:
+        logger.debug("Mission routes not available", exc_info=True)
+
     # Agent Manager routes (if available)
     try:
         if hasattr(app.state, "agent_manager") and app.state.agent_manager:

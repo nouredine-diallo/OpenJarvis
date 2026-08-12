@@ -88,6 +88,11 @@ except ImportError:
     pass
 
 try:
+    import openjarvis.tools.personal_memory  # noqa: F401
+except ImportError:
+    pass
+
+try:
     import openjarvis.tools.skill_manage  # noqa: F401
 except ImportError:
     pass
@@ -149,6 +154,11 @@ except ImportError:
 
 try:
     import openjarvis.tools.knowledge_sql  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.mission  # noqa: F401
 except ImportError:
     pass
 

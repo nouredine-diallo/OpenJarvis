@@ -181,23 +181,75 @@ def _get_fact_store():
 
 
 @memory.command(name="list")
-def list_facts() -> None:
+@click.option(
+    "--kind",
+    default=None,
+    help="Filter by kind: preference, fact, decision, rule.",
+)
+def list_facts(kind: str | None) -> None:
     """List durable facts captured by the automatic memory service."""
     console = Console()
 
+    from openjarvis.memory.store import normalize_kind
+
     store = _get_fact_store()
-    facts = store.list()
+    facts = store.list(kind=kind)
     if not facts:
         console.print("[yellow]No memory facts stored yet.[/yellow]")
         return
 
-    table = Table(title=f"Memory Facts ({len(facts)})")
+    table = Table(title=f"Memory ({len(facts)})")
     table.add_column("#", style="dim", width=4)
-    table.add_column("Fact")
+    table.add_column("Kind", style="magenta")
+    table.add_column("Entry")
     table.add_column("Source", style="cyan")
     for i, fact in enumerate(facts, 1):
-        table.add_row(str(i), fact.text, fact.source or "-")
+        table.add_row(
+            str(i),
+            normalize_kind(fact.kind),
+            fact.text,
+            fact.source or "-",
+        )
     console.print(table)
+
+
+@memory.command()
+@click.argument("text")
+@click.option(
+    "--kind",
+    default="fact",
+    type=click.Choice(["preference", "fact", "decision", "rule"], case_sensitive=False),
+    help="Memory kind (default: fact).",
+)
+def add(text: str, kind: str) -> None:
+    """Manually store a memory entry (preference/fact/decision/rule)."""
+    console = Console()
+
+    store = _get_fact_store()
+    stored = store.add(text, source="manual", kind=kind)
+    from openjarvis.memory.mirror import refresh
+
+    refresh(store)
+    if stored:
+        console.print(f"[green]Stored {kind}: {text}[/green]")
+    else:
+        console.print("[yellow]Duplicate — nothing stored.[/yellow]")
+
+
+@memory.command(name="mirror")
+def mirror() -> None:
+    """Regenerate the Markdown memory mirror (Obsidian-readable)."""
+    console = Console()
+
+    store = _get_fact_store()
+    from openjarvis.memory.mirror import refresh
+
+    paths = refresh(store)
+    if not paths:
+        console.print("[red]Mirror refresh failed.[/red]")
+        raise SystemExit(1)
+    for p in paths:
+        console.print(f"[green]✓[/green] {p}")
 
 
 @memory.command()

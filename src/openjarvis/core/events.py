@@ -78,6 +78,15 @@ class EventType(str, Enum):
     OPTIMIZE_TRIAL_END = "optimize_trial_end"
     OPTIMIZE_RUN_END = "optimize_run_end"
     FEEDBACK_RECEIVED = "feedback_received"
+    # Phase 4 — Mission Engine asynchrone persistant (D10)
+    MISSION_CREATED = "mission_created"
+    MISSION_START = "mission_start"
+    MISSION_STEP_START = "mission_step_start"
+    MISSION_STEP_END = "mission_step_end"
+    MISSION_END = "mission_end"
+    MISSION_FAILED = "mission_failed"
+    MISSION_RESUMED = "mission_resumed"
+    MISSION_BUDGET_EXCEEDED = "mission_budget_exceeded"
 
 
 @dataclass(slots=True)

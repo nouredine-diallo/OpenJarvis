@@ -159,6 +159,7 @@ def create_app(
     speech_backend=None,
     agent_manager=None,
     agent_scheduler=None,
+    mission_engine=None,
     mcp_tools=None,
     mcp_clients=None,
     api_key: str = "",
@@ -234,6 +235,7 @@ def create_app(
     app.state.speech_backend = speech_backend
     app.state.agent_manager = agent_manager
     app.state.agent_scheduler = agent_scheduler
+    app.state.mission_engine = mission_engine
     app.state.mcp_tools = list(mcp_tools or [])
     app.state._mcp_discovery_lock = threading.Lock()
     app.state._mcp_clients_lock = threading.Lock()
@@ -296,6 +298,15 @@ def create_app(
             except Exception:
                 scheduler_drained = False
                 logger.debug("Agent scheduler shutdown failed", exc_info=True)
+
+        # Mission engine: stop the worker thread (per-step checkpoints mean an
+        # in-flight mission resumes from its last saved state on next boot).
+        mission_engine = getattr(app.state, "mission_engine", None)
+        if mission_engine is not None:
+            try:
+                mission_engine.stop()
+            except Exception:
+                logger.debug("Mission engine shutdown failed", exc_info=True)
 
         # Give normal work a brief chance to finish before cancellation.
         _join_workers(timeout=_MANAGED_SHUTDOWN_GRACE_SECONDS)

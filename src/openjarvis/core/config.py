@@ -1417,6 +1417,25 @@ class WorkflowConfig:
 
 
 @dataclass(slots=True)
+class MissionsConfig:
+    """Mission Engine asynchrone persistant (Phase 4 / D10) settings."""
+
+    enabled: bool = False
+    db_path: str = ""  # Defaults to ~/.openjarvis/missions.db
+    max_workers: int = 1
+    poll_interval: float = 0.5
+    default_autonomy: int = 1
+    max_steps: int = 10
+    max_budget_tokens: int = 50000
+    worker_capabilities: List[str] = field(default_factory=list)
+    report_base_url: str = ""
+    # D12 disposable worker: auto-approve tool confirmations (shell, git, …)
+    # for steps that already passed the required_capabilities gate. Headless
+    # missions have no human to confirm; false keeps the strict default.
+    auto_approve_tools: bool = True
+
+
+@dataclass(slots=True)
 class SessionConfig:
     """Cross-channel session settings."""
 
@@ -1489,6 +1508,12 @@ class MemoryFilesConfig:
         default_factory=lambda: str(get_config_dir() / "MEMORY.md")
     )
     user_path: str = field(default_factory=lambda: str(get_config_dir() / "USER.md"))
+    # Phase 3 — combined 4-kind memory mirror injected into every system prompt.
+    personal_context_path: str = field(
+        default_factory=lambda: str(
+            get_config_dir() / "memory" / "PERSONAL_CONTEXT.md"
+        )
+    )
     nudge_interval: int = 10
     persona_name: str = ""  # named persona dir under <config-dir>/personas/<name>/
 
@@ -1608,6 +1633,7 @@ class JarvisConfig:
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
+    missions: MissionsConfig = field(default_factory=MissionsConfig)
     sessions: SessionConfig = field(default_factory=SessionConfig)
     a2a: A2AConfig = field(default_factory=A2AConfig)
     operators: OperatorsConfig = field(default_factory=OperatorsConfig)
@@ -1897,6 +1923,7 @@ def load_config(path: Optional[Path] = None) -> JarvisConfig:
             "sandbox",
             "scheduler",
             "workflow",
+            "missions",
             "sessions",
             "a2a",
             "operators",
