@@ -6,7 +6,8 @@ Endpoints mirror the mission lifecycle:
 * ``GET  /v1/missions``         → list missions
 * ``GET  /v1/missions/{id}``    → live state (resume point after a crash)
 * ``GET  /v1/missions/{id}/events`` → immutable audit trail
-* ``POST /v1/missions/{id}/pause|resume|cancel|choose`` → lifecycle control
+* ``POST /v1/missions/{id}/pause|resume|cancel|choose|feedback`` → lifecycle control
+* ``GET  /v1/missions/{id}/artifacts/{filename}`` → serve a mission artifact (screenshot, ...)
 
 The engine is reached through ``request.app.state.mission_engine``; if it is
 not present (missions disabled), the router returns 503.
@@ -14,9 +15,11 @@ not present (missions disabled), the router returns 503.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from openjarvis.missions.types import MissionStep
@@ -161,3 +164,40 @@ async def choose_mission_option(mission_id: str, body: _ChoiceIn, request: Reque
     if mission is None:
         raise HTTPException(status_code=404, detail="Mission not found")
     return {"mission_id": mission.mission_id, "status": mission.status}
+
+
+class _FeedbackIn(BaseModel):
+    feedback: str
+
+
+@router.post("/{mission_id}/feedback")
+async def give_mission_feedback(mission_id: str, body: _FeedbackIn, request: Request):
+    """Spec §32: 'the button is too big' -> the mission picks the
+    conversation back up with a revision round instead of the user having
+    to launch a whole new mission from scratch."""
+    engine = _engine(request)
+    mission = engine.give_feedback(mission_id, body.feedback)
+    if mission is None:
+        raise HTTPException(status_code=404, detail="Mission not found")
+    return {"mission_id": mission.mission_id, "status": mission.status}
+
+
+@router.get("/{mission_id}/artifacts/{filename}")
+async def get_mission_artifact(mission_id: str, filename: str, request: Request):
+    """Serve a mission artifact (e.g. the visual-proof screenshot) as a
+    real, fetchable URL -- what report_base_url + this path becomes once
+    the Cloudflare Tunnel is live turns "preview URL" from a TODO into an
+    actual link, with zero further code changes needed then.
+    """
+    engine = _engine(request)
+    mission = engine.status(mission_id)
+    if mission is None:
+        raise HTTPException(status_code=404, detail="Mission not found")
+    # No ".." / no path separators -- artifacts are flat filenames within
+    # the mission's own directory, this isn't a general file browser.
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    candidates = [Path(a) for a in mission.artefacts if Path(a).name == filename]
+    if not candidates or not candidates[0].is_file():
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    return FileResponse(candidates[0])

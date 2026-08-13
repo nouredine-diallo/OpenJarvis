@@ -774,6 +774,7 @@ def serve(
             try:
                 from openjarvis.tools.mission import (  # noqa: F401
                     ChooseMissionOptionTool,
+                    GiveMissionFeedbackTool,
                     LaunchMissionTool,
                     MissionStatusTool,
                 )
@@ -781,6 +782,7 @@ def serve(
                 LaunchMissionTool._mission_engine = mission_engine
                 MissionStatusTool._mission_engine = mission_engine
                 ChooseMissionOptionTool._mission_engine = mission_engine
+                GiveMissionFeedbackTool._mission_engine = mission_engine
             except Exception as exc:  # noqa: BLE001
                 logger.debug("Mission tool injection failed: %s", exc)
             # show_current_state: on-demand visual proof ("montre-moi

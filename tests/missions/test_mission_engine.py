@@ -421,6 +421,122 @@ def test_build_report_includes_steps():
     assert "[OK]" in report
 
 
+def test_build_report_includes_confidence_and_preview_url():
+    """Spec §31/§33: the report must carry a confidence level and, when a
+    screenshot exists, a fetchable preview URL -- not just a step log."""
+    m = Mission(
+        mission_id="abc",
+        goal="G",
+        created_at=1.0,
+        updated_at=1.0,
+        status="succeeded",
+        verification={"verified": True, "checks": {"has_goal": True, "has_steps": True}},
+        artefacts=["/home/land/.openjarvis/mission_artifacts/abc/final.png"],
+        steps=[MissionStep(index=0, title="A", status="succeeded", result="res a")],
+    )
+    report = _build_report(m, report_base_url="https://jarvisland.duckdns.org")
+    assert "confiance" in report
+    assert "Élevée" in report
+    assert "https://jarvisland.duckdns.org/v1/missions/abc/artifacts/final.png" in report
+
+
+def test_build_report_confidence_low_when_a_check_failed():
+    m = Mission(
+        mission_id="abc",
+        goal="G",
+        created_at=1.0,
+        updated_at=1.0,
+        verification={"verified": False, "checks": {"has_goal": True, "no_blocked_steps": False}},
+    )
+    report = _build_report(m)
+    assert "Faible" in report
+    assert "no_blocked_steps" in report
+
+
+# ---------------------------------------------------------------------------
+# Engine — feedback / revision round (spec §32)
+# ---------------------------------------------------------------------------
+
+
+def test_give_feedback_appends_revision_round_and_resumes(store):
+    coder = FakeCodingAgent()
+    engine = MissionEngine(store, FakeSystem(), coding_agent=coder, worker_capabilities=["coding"])
+    engine.start()
+    try:
+        mission = engine.launch(
+            "Ajoute une page d'accueil",
+            steps=coding_pr_steps("Ajoute une page d'accueil"),
+            requested_by="telegram:7",
+        )
+        assert _wait_until(lambda: engine.status(mission.mission_id).is_terminal)
+        first_round = engine.status(mission.mission_id)
+        assert first_round.status == MissionStatus.SUCCEEDED.value
+        assert len(first_round.steps) == 5
+
+        revised = engine.give_feedback(mission.mission_id, "Le bouton est trop gros")
+        assert revised is not None
+        assert len(revised.steps) == 10  # original 5 + a fresh 5-phase round
+        assert revised.status == MissionStatus.PENDING.value
+
+        assert _wait_until(lambda: engine.status(mission.mission_id).is_terminal)
+        done = engine.status(mission.mission_id)
+        assert done.status == MissionStatus.SUCCEEDED.value
+        assert [s.status for s in done.steps] == ["succeeded"] * 10
+        assert done.metadata.get("feedback_rounds") == ["Le bouton est trop gros"]
+        assert "trop gros" in done.report
+        events = [e.event_type for e in store.list_events(mission.mission_id)]
+        assert "feedback_received" in events
+    finally:
+        engine.stop()
+
+
+def test_give_feedback_without_mission_id_targets_most_recent_succeeded(store):
+    engine = MissionEngine(
+        store, FakeSystem(), coding_agent=FakeCodingAgent(), worker_capabilities=["coding"],
+    )
+    engine.start()
+    try:
+        mission = engine.launch(
+            "Ajoute une page",
+            steps=coding_pr_steps("Ajoute une page"),
+            requested_by="telegram:9",
+        )
+        assert _wait_until(lambda: engine.status(mission.mission_id).is_terminal)
+        revised = engine.give_feedback(None, "trop lent", requested_by="telegram:9")
+        assert revised is not None
+        assert revised.mission_id == mission.mission_id
+    finally:
+        engine.stop()
+
+
+def test_give_feedback_ignored_for_non_coding_mission(store):
+    """Feedback only makes sense on a mission that touched code -- a
+    research mission's answer isn't something a revision round applies to."""
+    engine = MissionEngine(store, FakeSystem(["Réponse de recherche."]))
+    engine.start()
+    try:
+        mission = engine.launch(
+            "Quelle est la capitale du Sénégal ?",
+            steps=[MissionStep(index=0, title="Réponse", prompt="Fais 1")],
+        )
+        assert _wait_until(lambda: engine.status(mission.mission_id).is_terminal)
+        unchanged = engine.give_feedback(mission.mission_id, "pas convaincant")
+        assert unchanged is not None
+        assert len(unchanged.steps) == 1  # nothing appended
+        assert unchanged.status == MissionStatus.SUCCEEDED.value  # unchanged
+    finally:
+        engine.stop()
+
+
+def test_give_feedback_returns_none_when_no_mission_found(store):
+    engine = MissionEngine(store, FakeSystem())
+    engine.start()
+    try:
+        assert engine.give_feedback(None, "quoi que ce soit", requested_by="telegram:404") is None
+    finally:
+        engine.stop()
+
+
 # ---------------------------------------------------------------------------
 # Engine — worker capabilities gate (D12: WAITING_FOR_WORKER)
 # ---------------------------------------------------------------------------
@@ -586,10 +702,13 @@ def test_visual_proof_captured_and_sent_when_server_detected(store, monkeypatch)
             ],
             requested_by="telegram:1",
         )
+        # _try_visual_proof now runs BEFORE the terminal-status checkpoint
+        # save (see _finish's single-save fix) specifically so that once
+        # is_terminal is true, every mutation -- including this photo send
+        # and the artefact append -- has already happened. No separate
+        # wait needed for calls["sent"].
         assert _wait_until(lambda: engine.status(mission.mission_id).is_terminal)
-        # _try_visual_proof runs AFTER the status checkpoint is saved (same
-        # race as the audit-event tests above) -- wait for its own evidence.
-        assert _wait_until(lambda: len(calls["sent"]) == 1)
+        assert len(calls["sent"]) == 1
         done = engine.status(mission.mission_id)
         assert done.status == MissionStatus.SUCCEEDED.value
         target, path, caption = calls["sent"][0]

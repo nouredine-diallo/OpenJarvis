@@ -353,6 +353,73 @@ class MissionEngine:
             candidates = [m for m in candidates if m.requested_by == requested_by]
         return candidates[0] if candidates else None
 
+    def give_feedback(
+        self,
+        mission_id: Optional[str],
+        feedback: str,
+        *,
+        requested_by: str = "",
+    ) -> Optional[Mission]:
+        """Spec §32: "the button is too big" -> a revision round on the
+        SAME mission, not a brand new one from scratch. Only applies to a
+        mission that already SUCCEEDED (a live coding round is a
+        different concern -- use ``choose``/normal execution for that) and
+        only if it had a coding capability (feedback on a plain research
+        answer doesn't fit this shape). Appends a fresh
+        :func:`coding_pr_steps` round for ``{goal} + feedback`` and
+        resumes -- history (previous rounds' results) stays visible.
+
+        ``mission_id=None`` picks the most recently SUCCEEDED mission for
+        ``requested_by``, mirroring :meth:`choose` -- a reply like "le
+        bouton est trop gros" doesn't need to quote a mission_id either.
+        """
+        mission = self._resolve_feedback_target(mission_id, requested_by)
+        if mission is None:
+            return None
+        if mission.status != MissionStatus.SUCCEEDED.value:
+            return mission
+        is_coding_mission = any(
+            "coding" in (getattr(s, "required_capabilities", None) or [])
+            for s in mission.steps
+        )
+        if not is_coding_mission:
+            return mission
+
+        revised_goal = (
+            f"{mission.goal}\n\nRetour de l'utilisateur après la version "
+            f"précédente : {feedback}\n\nAjuste le travail déjà fait en "
+            f"conséquence (ne recommence pas depuis zéro)."
+        )
+        next_index = len(mission.steps)
+        appended = coding_pr_steps(revised_goal)
+        for offset, step in enumerate(appended):
+            step.index = next_index + offset
+        mission.steps.extend(appended)
+        mission.metadata.setdefault("feedback_rounds", []).append(feedback)
+        mission.status = MissionStatus.PENDING.value
+        # This mission already went through _finish() once; its prior
+        # report/verification describe the OLD state and must not be
+        # mistaken for the current one until the new round finishes.
+        mission.report = ""
+        mission.verification = {}
+        self._store.save_mission(mission)
+        self._append_event(mission.mission_id, "feedback_received", {"feedback": feedback})
+        self._publish(EventType.MISSION_RESUMED, {"mission_id": mission.mission_id})
+        self.submit(mission.mission_id)
+        return mission
+
+    def _resolve_feedback_target(
+        self, mission_id: Optional[str], requested_by: str
+    ) -> Optional[Mission]:
+        if mission_id:
+            return self._store.get_mission(mission_id)
+        candidates = self._store.list_missions(
+            status=MissionStatus.SUCCEEDED.value, limit=20
+        )
+        if requested_by:
+            candidates = [m for m in candidates if m.requested_by == requested_by]
+        return candidates[0] if candidates else None
+
     def cancel(self, mission_id: str) -> Optional[Mission]:
         """Cancel a non-terminal mission."""
         mission = self._store.get_mission(mission_id)
@@ -691,6 +758,18 @@ class MissionEngine:
             )
             return
 
+        # Visual proof BEFORE the checkpoint save (not after): _finish()
+        # used to save, then run this, then save again -- a stale-write
+        # race found live via a flaky test: give_feedback() (or choose(),
+        # cancel(), any other concurrent mutator) reading+modifying+saving
+        # the mission during that gap had its write silently clobbered by
+        # this method's own second save, which was still holding the
+        # PRE-visual-proof in-memory copy. One save at the end, after every
+        # mutation (including the artefact append), closes that window.
+        self._try_visual_proof(mission)
+        mission.report = _build_report(
+            mission, report_base_url=self._report_base_url
+        )
         self._store.save_mission(mission)
         self._append_event(
             mission.mission_id,
@@ -701,7 +780,6 @@ class MissionEngine:
             EventType.MISSION_END,
             {"mission_id": mission.mission_id, "verified": True},
         )
-        self._try_visual_proof(mission)
         self._notify(mission, title="MISSION TERMINÉE")
 
     def _try_visual_proof(self, mission: Mission) -> None:
@@ -741,7 +819,9 @@ class MissionEngine:
                 )
                 return
             mission.artefacts.append(path)
-            self._store.save_mission(mission)
+            # No save here -- the caller (_finish) does exactly one save
+            # after every mutation (including this one) to avoid the
+            # stale-write race a double-save used to cause (see _finish).
             sent = self._photo_sender(
                 mission.requested_by, path, f"Résultat — {mission.goal[:200]}"
             )
@@ -1016,13 +1096,35 @@ def improve_steps(goal: str) -> List[MissionStep]:
     ]
 
 
-def _build_report(mission: Mission) -> str:
+def _confidence_label(mission: Mission) -> str:
+    """Spec §33: a confidence level, not just "done"/"not done". Derived
+    from the verification checks that already ran (deterministic, not a
+    model's own self-assessment) -- "Élevée" only when every check the
+    anti-hallucination gate ran actually passed clean."""
+    checks = (mission.verification or {}).get("checks") or {}
+    if not checks:
+        return "Non évaluée"
+    if all(checks.values()):
+        return "Élevée (toutes les vérifications passées)"
+    failed = [name for name, ok in checks.items() if not ok]
+    return f"Faible ({', '.join(failed)})"
+
+
+def _build_report(mission: Mission, *, report_base_url: str = "") -> str:
+    """Spec §31/§33: objectif, étapes, preuves (diff/tests/capture),
+    niveau de confiance, points restants -- not just a step-by-step log.
+    """
     lines = [
         f"# Rapport de mission — {mission.mission_id}",
         f"Objectif : {mission.goal}",
         f"Statut : TERMINÉE ({len(mission.steps)} étape(s))",
-        "",
+        f"Niveau de confiance : {_confidence_label(mission)}",
     ]
+    rounds = (mission.metadata or {}).get("feedback_rounds") or []
+    if rounds:
+        lines.append(f"Retours pris en compte : {len(rounds)} — {'; '.join(rounds)}")
+    lines.append("")
+
     for step in mission.steps:
         status = "OK" if step.status == MissionStepStatus.SUCCEEDED.value else "FAIL"
         lines.append(f"## Étape {step.index} [{status}] — {step.title}")
@@ -1031,6 +1133,19 @@ def _build_report(mission: Mission) -> str:
         if step.error:
             lines.append(f"Erreur : {step.error}")
         lines.append("")
+
+    if mission.artefacts:
+        lines.append("## Preuves")
+        for artefact in mission.artefacts:
+            name = Path(artefact).name
+            if report_base_url:
+                lines.append(
+                    f"- Capture : {report_base_url}/v1/missions/{mission.mission_id}/artifacts/{name}"
+                )
+            else:
+                lines.append(f"- Capture (locale, pas encore accessible par lien) : {artefact}")
+        lines.append("")
+
     return "\n".join(lines)
 
 

@@ -260,6 +260,87 @@ class ChooseMissionOptionTool(BaseTool):
         )
 
 
+@ToolRegistry.register("give_mission_feedback")
+class GiveMissionFeedbackTool(BaseTool):
+    """Spec §32: send a completed mission back for a revision round."""
+
+    tool_id = "give_mission_feedback"
+    _mission_engine: Optional[Any] = None
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="give_mission_feedback",
+            description=(
+                "Send feedback on a mission that already finished (status "
+                "succeeded) so it does a revision round instead of the "
+                "user launching a whole new mission from scratch. Call "
+                "this when the user reacts to a finished mission's result "
+                "with something to change -- 'le bouton est trop gros', "
+                "'ajoute aussi X', 'ce n'est pas ce que je voulais, fais "
+                "plutôt...'. mission_id is optional: omitted, it targets "
+                "the user's most recently completed mission."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "feedback": {
+                        "type": "string",
+                        "description": "The user's feedback, in their own words.",
+                    },
+                    "mission_id": {
+                        "type": "string",
+                        "description": "Optional -- omit to target the most "
+                        "recently completed mission for this user.",
+                    },
+                },
+                "required": ["feedback"],
+            },
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        engine = self._mission_engine
+        if engine is None:
+            return ToolResult(
+                tool_name=self.tool_id,
+                content="Mission engine is not available on this server.",
+                success=False,
+            )
+        feedback = str(params.get("feedback", "")).strip()
+        if not feedback:
+            return ToolResult(
+                tool_name=self.tool_id,
+                content="Il faut préciser le retour.",
+                success=False,
+            )
+        mission_id = str(params.get("mission_id", "") or "").strip() or None
+        requested_by = params.get("_channel", "") or params.get("requested_by", "")
+        mission = engine.give_feedback(mission_id, feedback, requested_by=requested_by)
+        if mission is None:
+            return ToolResult(
+                tool_name=self.tool_id,
+                content="Aucune mission terminée récente trouvée.",
+                success=False,
+            )
+        if mission.status not in ("pending", "running"):
+            return ToolResult(
+                tool_name=self.tool_id,
+                content=(
+                    f"Mission {mission.mission_id} ne peut pas recevoir de "
+                    f"retour dans son état actuel (statut : {mission.status})."
+                ),
+                success=False,
+            )
+        return ToolResult(
+            tool_name=self.tool_id,
+            content=(
+                f"Retour pris en compte pour la mission {mission.mission_id} "
+                f"— nouvelle passe lancée."
+            ),
+            metadata={"mission_id": mission.mission_id},
+        )
+
+
 def _format_status(mission) -> str:
     lines = [
         f"Mission {mission.mission_id} — {mission.status}",
@@ -280,4 +361,9 @@ def _format_status(mission) -> str:
     return "\n".join(lines)
 
 
-__all__ = ["LaunchMissionTool", "MissionStatusTool", "ChooseMissionOptionTool"]
+__all__ = [
+    "LaunchMissionTool",
+    "MissionStatusTool",
+    "ChooseMissionOptionTool",
+    "GiveMissionFeedbackTool",
+]
