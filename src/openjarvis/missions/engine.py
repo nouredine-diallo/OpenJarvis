@@ -766,7 +766,7 @@ class MissionEngine:
         # this method's own second save, which was still holding the
         # PRE-visual-proof in-memory copy. One save at the end, after every
         # mutation (including the artefact append), closes that window.
-        self._try_visual_proof(mission)
+        captured_path = self._try_visual_proof(mission)
         mission.report = _build_report(
             mission, report_base_url=self._report_base_url
         )
@@ -781,22 +781,31 @@ class MissionEngine:
             {"mission_id": mission.mission_id, "verified": True},
         )
         self._notify(mission, title="MISSION TERMINÉE")
+        if captured_path:
+            # Spawned only *after* the checkpoint save above has landed,
+            # not from inside _try_visual_proof: the backup worker re-reads
+            # the mission from the store and saves its own patch, so
+            # starting it earlier would race this method's own save and
+            # risk being silently clobbered by it (same class of bug as
+            # the stale-write race documented above).
+            self._try_backup_artifact(mission, captured_path)
 
-    def _try_visual_proof(self, mission: Mission) -> None:
+    def _try_visual_proof(self, mission: Mission) -> Optional[str]:
         """Best-effort screenshot of whatever dev server a coding mission
         left running, sent as a photo. Never raises, never delays/blocks
         the mission's own completion -- every failure mode (disabled,
         no photo_sender wired, no server detected, RAM too tight,
         playwright missing, capture error) is a silent no-op, logged at
-        debug level and recorded as a mission event for auditability."""
+        debug level and recorded as a mission event for auditability.
+        Returns the captured artefact's local path on success, else None."""
         if not self._enable_visual_proof or self._photo_sender is None:
-            return
+            return None
         is_coding_mission = any(
             "coding" in (getattr(s, "required_capabilities", None) or [])
             for s in mission.steps
         )
         if not is_coding_mission:
-            return
+            return None
         try:
             from openjarvis.tools.screenshot import capture_screenshot, find_dev_server_url
 
@@ -806,7 +815,7 @@ class MissionEngine:
                 self._append_event(
                     mission.mission_id, "visual_proof_skipped", {"reason": "no_server_detected"}
                 )
-                return
+                return None
             out_path = str(
                 Path.home() / ".openjarvis" / "mission_artifacts" / mission.mission_id / "final.png"
             )
@@ -817,7 +826,7 @@ class MissionEngine:
                 self._append_event(
                     mission.mission_id, "visual_proof_skipped", {"reason": reason}
                 )
-                return
+                return None
             mission.artefacts.append(path)
             # No save here -- the caller (_finish) does exactly one save
             # after every mutation (including this one) to avoid the
@@ -830,9 +839,50 @@ class MissionEngine:
                 "visual_proof_captured",
                 {"url": url, "path": path, "sent": bool(sent)},
             )
+            return path
         except Exception:  # noqa: BLE001
             logger.debug("Visual proof capture failed", exc_info=True)
             self._append_event(mission.mission_id, "visual_proof_skipped", {"reason": "error"})
+
+    def _try_backup_artifact(self, mission: Mission, local_path: str) -> None:
+        """Fire-and-forget: push the artefact to the permanent GitHub
+        backup repo in a background thread so a slow or unreachable
+        network never delays the mission's own completion/notification --
+        the git clone/push round-trip can take several seconds on a first
+        run, far more than a mission's own checkpoint save should ever
+        wait on. The mission is re-read from the store and patched once
+        the push finishes (which is typically after the mission has
+        already been reported as done); _build_report simply keeps using
+        the local artifacts API URL for this artefact until then."""
+
+        def _worker() -> None:
+            try:
+                from openjarvis.tools.artifact_backup import push_artifact
+
+                url = push_artifact(local_path, mission.mission_id)
+                if not url:
+                    return
+                fresh = self._store.get_mission(mission.mission_id)
+                if fresh is None:
+                    return
+                # This can race _finish()'s own checkpoint save (this thread
+                # is spawned from inside _try_visual_proof, before _finish
+                # persists mission.artefacts.append(local_path)) -- if we
+                # read the store before that save lands, local_path won't be
+                # in fresh.artefacts yet. Self-heal rather than lose the URL.
+                if local_path not in fresh.artefacts:
+                    fresh.artefacts.append(local_path)
+                urls = fresh.metadata.setdefault("artefact_github_urls", {})
+                urls[local_path] = url
+                fresh.report = _build_report(fresh, report_base_url=self._report_base_url)
+                self._store.save_mission(fresh)
+                self._append_event(
+                    mission.mission_id, "artifact_backed_up", {"path": local_path, "url": url}
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("Artifact GitHub backup failed", exc_info=True)
+
+        threading.Thread(target=_worker, daemon=True, name="artifact-backup").start()
 
     def _fail(self, mission: Mission, reason: str) -> None:
         mission.status = MissionStatus.FAILED.value
@@ -1136,9 +1186,14 @@ def _build_report(mission: Mission, *, report_base_url: str = "") -> str:
 
     if mission.artefacts:
         lines.append("## Preuves")
+        github_urls = (mission.metadata or {}).get("artefact_github_urls") or {}
         for artefact in mission.artefacts:
             name = Path(artefact).name
-            if report_base_url:
+            gh_url = github_urls.get(artefact)
+            if gh_url:
+                # Permanent: hosted on GitHub, reachable even with the PC off.
+                lines.append(f"- Capture (lien permanent) : {gh_url}")
+            elif report_base_url:
                 lines.append(
                     f"- Capture : {report_base_url}/v1/missions/{mission.mission_id}/artifacts/{name}"
                 )

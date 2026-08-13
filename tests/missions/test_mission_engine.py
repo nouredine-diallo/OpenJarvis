@@ -721,6 +721,109 @@ def test_visual_proof_captured_and_sent_when_server_detected(store, monkeypatch)
         engine.stop()
 
 
+def test_artifact_backed_up_to_github_gives_permanent_report_link(store, monkeypatch):
+    """When the GitHub backup push succeeds, the report's Preuves section
+    links to the permanent github.com URL instead of the local tunnel/API
+    URL -- so the link keeps working even with the PC off."""
+
+    def _fake_find(evidence):
+        return "http://127.0.0.1:3000" if "listening" in evidence else None
+
+    def _fake_capture(url, out_path, **kwargs):
+        import pathlib
+        pathlib.Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "wb") as fh:
+            fh.write(b"\x89PNG\r\n\x1a\nfake")
+        return out_path, "ok (0.1s)"
+
+    monkeypatch.setattr("openjarvis.tools.screenshot.find_dev_server_url", _fake_find)
+    monkeypatch.setattr("openjarvis.tools.screenshot.capture_screenshot", _fake_capture)
+    monkeypatch.setattr(
+        "openjarvis.tools.artifact_backup.push_artifact",
+        lambda local_path, mission_id: (
+            f"https://github.com/nouredine-diallo/jarvis-artifacts/blob/main/"
+            f"missions/{mission_id}/final.png"
+        ),
+    )
+
+    system = FakeSystem(["Serveur démarré, listening on port 3000."])
+    engine = MissionEngine(
+        store, system,
+        photo_sender=lambda t, p, c: True,
+        worker_capabilities=["coding"],
+        report_base_url="https://jarvisland.duckdns.org",
+    )
+    engine.start()
+    try:
+        mission = engine.launch(
+            "Crée une page d'accueil",
+            steps=[
+                MissionStep(
+                    index=0, title="Ship", prompt="Fais 1",
+                    required_capabilities=["coding"],
+                )
+            ],
+        )
+        # The GitHub push runs in a background thread (must never block the
+        # mission's own completion), so the permanent link lands in the
+        # report asynchronously -- poll for it rather than a one-shot check.
+        assert _wait_until(
+            lambda: "jarvis-artifacts/blob/main" in (engine.status(mission.mission_id).report or "")
+        )
+        done = engine.status(mission.mission_id)
+        assert "lien permanent" in done.report
+        assert "jarvisland.duckdns.org" not in done.report
+    finally:
+        engine.stop()
+
+
+def test_artifact_backup_failure_falls_back_to_local_report_url(store, monkeypatch):
+    """If the GitHub push fails (offline, quota, etc.), the report still
+    gets a usable link -- the local tunnel/API URL -- rather than nothing."""
+
+    def _fake_find(evidence):
+        return "http://127.0.0.1:3000" if "listening" in evidence else None
+
+    def _fake_capture(url, out_path, **kwargs):
+        import pathlib
+        pathlib.Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "wb") as fh:
+            fh.write(b"\x89PNG\r\n\x1a\nfake")
+        return out_path, "ok (0.1s)"
+
+    monkeypatch.setattr("openjarvis.tools.screenshot.find_dev_server_url", _fake_find)
+    monkeypatch.setattr("openjarvis.tools.screenshot.capture_screenshot", _fake_capture)
+    monkeypatch.setattr(
+        "openjarvis.tools.artifact_backup.push_artifact",
+        lambda local_path, mission_id: None,
+    )
+
+    system = FakeSystem(["Serveur démarré, listening on port 3000."])
+    engine = MissionEngine(
+        store, system,
+        photo_sender=lambda t, p, c: True,
+        worker_capabilities=["coding"],
+        report_base_url="https://jarvisland.duckdns.org",
+    )
+    engine.start()
+    try:
+        mission = engine.launch(
+            "Crée une page d'accueil",
+            steps=[
+                MissionStep(
+                    index=0, title="Ship", prompt="Fais 1",
+                    required_capabilities=["coding"],
+                )
+            ],
+        )
+        assert _wait_until(lambda: engine.status(mission.mission_id).is_terminal)
+        done = engine.status(mission.mission_id)
+        assert "jarvisland.duckdns.org" in done.report
+        assert "lien permanent" not in done.report
+    finally:
+        engine.stop()
+
+
 def test_visual_proof_skipped_when_no_server_detected(store, monkeypatch):
     monkeypatch.setattr(
         "openjarvis.tools.screenshot.find_dev_server_url", lambda evidence: None
