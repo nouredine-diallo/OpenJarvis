@@ -486,15 +486,13 @@ def serve(
     memory_backend = None
     try:
         import openjarvis.tools.storage  # noqa: F401
-        from openjarvis.core.registry import MemoryRegistry
+        from openjarvis.tools.storage import resolve_memory_backend
 
-        mem_key = config.memory.default_backend
-        if MemoryRegistry.contains(mem_key):
-            memory_backend = MemoryRegistry.create(
-                mem_key,
-                db_path=config.memory.db_path,
+        memory_backend = resolve_memory_backend(config)
+        if memory_backend is not None:
+            console.print(
+                f"  Memory:    [cyan]active ({config.memory.default_backend})[/cyan]"
             )
-            console.print("  Memory:    [cyan]active[/cyan]")
     except Exception as exc:
         logger.debug("Memory backend init failed: %s", exc)
 
@@ -508,6 +506,7 @@ def serve(
             engine,
             model_name,
             event_bus=bus,
+            retrieval_backend=memory_backend,
         )
         if memory_service is not None:
             memory_service.start()

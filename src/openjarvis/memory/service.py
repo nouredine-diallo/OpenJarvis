@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import time
 from typing import Any, List, Optional
 
 from openjarvis.core.events import Event, EventBus, EventType
@@ -41,11 +42,20 @@ class MemoryService:
         *,
         event_bus: EventBus | None = None,
         max_queue: int = 256,
+        retrieval_backend: Any = None,
     ) -> None:
         self._store = store
         self._extractor = extractor
         self._event_bus = event_bus
         self._subscribed = False
+        # Brique 2 (docs/SPEC_BRIQUE2_MEMOIRE.md §4.2 point 4): the fact
+        # store (JSONL, 4 kinds) and the retrieval backend (sparse/dense/
+        # hybrid) used to be two disconnected systems -- a rule added here
+        # was never semantically searchable via the `retrieval` tool. When
+        # set, every newly extracted fact is also indexed into this backend
+        # (kind/source/date as metadata), tagged the same way it's already
+        # stored in the fact store, so both stay in sync.
+        self._retrieval_backend = retrieval_backend
         self._queue: "queue.Queue[Any]" = queue.Queue(maxsize=max(1, max_queue))
         self._thread: Optional[threading.Thread] = None
         self._running = threading.Event()
@@ -164,6 +174,28 @@ class MemoryService:
             if stored:
                 logger.debug("Memory service stored %d new fact(s)", stored)
                 self._refresh_mirror()
+            self._index_facts_for_retrieval(facts)
+
+    def _index_facts_for_retrieval(self, facts: List[Fact]) -> None:
+        """Best-effort: mirror each fact into the retrieval backend so it
+        becomes semantically searchable (hybrid BM25+dense), not just
+        listable from the fact store. Never raises -- a retrieval-index
+        failure must not affect the fact store, which stays the source of
+        truth (PERSONAL_CONTEXT.md mirror, etc.) regardless."""
+        if self._retrieval_backend is None:
+            return
+        for fact in facts:
+            try:
+                self._retrieval_backend.store(
+                    fact.text,
+                    source=fact.source or "auto",
+                    metadata={
+                        "kind": fact.kind,
+                        "created_at": fact.created_at or time.time(),
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("Failed to index fact into retrieval backend", exc_info=True)
 
     def _extract_facts(self, user_text: str, assistant_text: str) -> List[Fact]:
         """Run the extractor, tolerating the ``extract`` or ``extract_typed``
@@ -198,6 +230,7 @@ def build_memory_service(
     default_model: str = "",
     *,
     event_bus: EventBus | None = None,
+    retrieval_backend: Any = None,
 ) -> Optional[MemoryService]:
     """Build a :class:`MemoryService` from config, or ``None`` if disabled.
 
@@ -227,7 +260,9 @@ def build_memory_service(
         max_facts=getattr(mem, "max_facts", 1000),
     )
     extractor = FactExtractor(engine, model)
-    return MemoryService(store, extractor, event_bus=event_bus)
+    return MemoryService(
+        store, extractor, event_bus=event_bus, retrieval_backend=retrieval_backend
+    )
 
 
 def publish_completed_exchange(

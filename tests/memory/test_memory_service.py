@@ -206,3 +206,92 @@ def test_build_memory_service_falls_back_to_default_model(tmp_path):
     )
     svc = build_memory_service(cfg, object(), "active-model")
     assert isinstance(svc, MemoryService)
+
+
+class FakeRetrievalBackend:
+    """Records every store() call -- test double for the fact store <->
+    retrieval backend link (Brique 2, spec §4.2 point 4)."""
+
+    def __init__(self, *, raises: bool = False):
+        self.stored = []
+        self._raises = raises
+
+    def store(self, content, *, source="", metadata=None):
+        if self._raises:
+            raise RuntimeError("backend down")
+        self.stored.append((content, source, metadata or {}))
+        return "fake-id"
+
+
+class TypedFactExtractor:
+    """Stub exposing extract_typed (the Fact-returning path), matching
+    the real FactExtractor's typed API rather than the plain-string one."""
+
+    def __init__(self, facts):
+        from openjarvis.memory.store import Fact
+
+        self._facts = [f if isinstance(f, Fact) else Fact(text=f) for f in facts]
+
+    def extract_typed(self, user_text, assistant_text=""):
+        return list(self._facts)
+
+
+def test_facts_are_indexed_into_retrieval_backend(tmp_path):
+    from openjarvis.memory.store import Fact, KIND_RULE
+
+    retrieval = FakeRetrievalBackend()
+    extractor = TypedFactExtractor([Fact(text="Never deploy on Friday", kind=KIND_RULE)])
+    svc = _service(tmp_path, extractor, retrieval_backend=retrieval)
+    svc.start()
+    try:
+        svc.submit("don't deploy Fridays", "noted")
+        assert _wait_until(lambda: len(retrieval.stored) == 1)
+        content, source, meta = retrieval.stored[0]
+        assert content == "Never deploy on Friday"
+        assert meta["kind"] == KIND_RULE
+        assert "created_at" in meta
+    finally:
+        svc.stop()
+
+
+def test_no_retrieval_backend_configured_is_a_silent_noop(tmp_path):
+    """Default behavior (no retrieval_backend passed) must be unchanged --
+    this is what every existing MemoryService caller does today."""
+    extractor = FakeExtractor(["User likes hiking"])
+    svc = _service(tmp_path, extractor)  # no retrieval_backend kwarg
+    svc.start()
+    try:
+        svc.submit("I love hiking", "Nice!")
+        assert _wait_until(lambda: svc.fact_count() == 1)
+    finally:
+        svc.stop()
+
+
+def test_retrieval_backend_failure_does_not_break_fact_store(tmp_path):
+    """A broken retrieval backend must never take down fact-store writes --
+    the fact store stays the source of truth regardless."""
+    from openjarvis.memory.store import Fact
+
+    retrieval = FakeRetrievalBackend(raises=True)
+    extractor = TypedFactExtractor([Fact(text="Some durable fact")])
+    svc = _service(tmp_path, extractor, retrieval_backend=retrieval)
+    svc.start()
+    try:
+        svc.submit("tell me something", "ok")
+        assert _wait_until(lambda: svc.fact_count() == 1)
+        assert [f.text for f in svc.list_facts()] == ["Some durable fact"]
+    finally:
+        svc.stop()
+
+
+def test_build_memory_service_passes_retrieval_backend_through(tmp_path):
+    retrieval = FakeRetrievalBackend()
+    cfg = SimpleNamespace(
+        memory=StorageConfig(
+            enabled=True,
+            extraction_model="active-model",
+            facts_path=str(tmp_path / "facts.jsonl"),
+        )
+    )
+    svc = build_memory_service(cfg, object(), retrieval_backend=retrieval)
+    assert svc._retrieval_backend is retrieval

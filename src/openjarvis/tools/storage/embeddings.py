@@ -170,4 +170,85 @@ class OllamaEmbedder(Embedder):
         return self._dim_cached
 
 
-__all__ = ["Embedder", "OllamaEmbedder", "SentenceTransformerEmbedder"]
+class FastEmbedEmbedder(Embedder):
+    """Local, zero-server embedder backed by ``fastembed`` (ONNX runtime).
+
+    Replaces :class:`OllamaEmbedder` as the default for the semantic memory
+    layer (Brique 2, PROJET_JARVIS.md / docs/SPEC_BRIQUE2_MEMOIRE.md):
+    Ollama/Gemma were abandoned this project (OOM on this machine's 7.6 GB
+    RAM, no GPU — see PLAN.md D9), so the dense backend needs an embedder
+    that never depends on a local server being up.
+
+    Model choice (measured on this machine, /tmp/b2, see the spec): the
+    target ``BAAI/bge-m3`` is unsupported by fastembed, and the
+    sentence-transformers path needs torch (~2 GB) which fails/OOMs here --
+    same trap as Gemma. ``bge-base-en-v1.5`` (768d, ~1 GB peak, ONNX, no
+    torch) is the adopted default; ``bge-small-en-v1.5`` (384d, ~320 MB) is
+    available for RAM-constrained runs via ``model_name``.
+
+    RAM discipline (Brique 2 decision D1, PROJET_JARVIS.md): the ~1 GB peak
+    is only acceptable because it's never held permanently -- this machine
+    already OOM'd twice on models that stayed resident (Gemma, D9). The
+    model is loaded lazily on the first :meth:`embed` call and released
+    right after each call returns, not kept alive between calls. Reload
+    after the first run is fast (ONNX weights are cached on disk by
+    fastembed itself, ~1-2s, not the ~236s first-download cost) --
+    verified live, see the class's tests.
+    """
+
+    def __init__(self, model_name: str = "BAAI/bge-base-en-v1.5") -> None:
+        self._model_name = model_name
+        self._model: Optional[Any] = None
+        # fastembed doesn't expose dim() directly; probed once (via a
+        # throwaway embed) and cached so dim() doesn't force a reload.
+        self._dim: Optional[int] = None
+
+    def _load(self) -> Any:
+        try:
+            from fastembed import TextEmbedding
+        except ImportError as exc:
+            raise ImportError(
+                "fastembed is required for FastEmbedEmbedder. Install it "
+                "with: pip install fastembed"
+            ) from exc
+        return TextEmbedding(self._model_name)
+
+    def embed(self, texts: list[str]) -> Any:
+        """Return a numpy array of shape ``(len(texts), dim)``, float32,
+        L2-normalized (fastembed's bge models are pre-normalized, but we
+        normalize defensively so callers can always treat dot-product as
+        cosine similarity, matching every other Embedder in this module).
+
+        Loads the model, embeds, then releases it -- never held resident
+        between calls (see the RAM-discipline note above)."""
+        import numpy as np
+
+        if not texts:
+            return np.zeros((0, self.dim()), dtype=np.float32)
+
+        model = self._load()
+        try:
+            vectors = np.array(list(model.embed(texts)), dtype=np.float32)
+        finally:
+            del model  # release the ~1 GB ONNX runtime session promptly
+
+        if self._dim is None:
+            self._dim = int(vectors.shape[1])
+        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+        norms = np.where(norms == 0, 1.0, norms)
+        return vectors / norms
+
+    def dim(self) -> int:
+        """Return the embedding dimensionality (probes the model, loading
+        and releasing it, on first call only -- cached after that)."""
+        if self._dim is None:
+            self.embed(["probe"])
+        return self._dim
+
+
+__all__ = [
+    "Embedder",
+    "FastEmbedEmbedder",
+    "OllamaEmbedder",
+    "SentenceTransformerEmbedder",
+]
