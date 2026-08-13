@@ -1467,6 +1467,15 @@ class MissionsConfig:
     # models (see D9), so a headless browser is never launched blind.
     enable_visual_proof: bool = True
     visual_proof_min_ram_mb: float = 1024.0
+    # Control plane heartbeat (Phase A, PC-independence -- PROJET_JARVIS.md):
+    # best-effort liveness ping to the always-on Cloudflare Worker so it can
+    # route missions to the PC while it's on and stop the moment it isn't.
+    # Empty URL (the default) disables it. The shared secret is a credential,
+    # not a setting -- read from CONTROL_PLANE_SHARED_SECRET in the
+    # environment (same pattern as every other secret here), never from
+    # this file.
+    control_plane_url: str = ""
+    control_plane_heartbeat_interval_seconds: float = 30.0
 
 
 @dataclass(slots=True)

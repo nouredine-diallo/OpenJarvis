@@ -785,6 +785,25 @@ def serve(
                 GiveMissionFeedbackTool._mission_engine = mission_engine
             except Exception as exc:  # noqa: BLE001
                 logger.debug("Mission tool injection failed: %s", exc)
+
+            if config.missions.control_plane_url:
+                try:
+                    from openjarvis.tools.control_plane_heartbeat import ControlPlaneHeartbeat
+
+                    _heartbeat = ControlPlaneHeartbeat(
+                        config.missions.control_plane_url,
+                        os.environ.get("CONTROL_PLANE_SHARED_SECRET", ""),
+                        config.missions.worker_capabilities or _default_worker_caps(),
+                        interval_seconds=config.missions.control_plane_heartbeat_interval_seconds,
+                    )
+                    _heartbeat.start()
+                    console.print(
+                        "  Control plane heartbeat: [cyan]"
+                        + config.missions.control_plane_url
+                        + "[/cyan]"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Control plane heartbeat init failed: %s", exc)
             # show_current_state: on-demand visual proof ("montre-moi
             # l'image"), independent of the automatic post-mission capture
             # above -- same photo_sender, so both paths behave identically.
