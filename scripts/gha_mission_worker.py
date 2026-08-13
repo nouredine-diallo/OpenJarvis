@@ -40,6 +40,10 @@ def ask_groq(api_key: str, goal: str) -> str:
         headers={
             "content-type": "application/json",
             "authorization": f"Bearer {api_key}",
+            # Groq's API also 403s the default "Python-urllib/x.y" UA as
+            # anti-abuse (same class of bug already found and fixed in the
+            # PC's control_plane_heartbeat.py) -- has to be set explicitly.
+            "user-agent": "JARVIS-GHA-Worker/1.0",
         },
     )
     with urllib.request.urlopen(request, timeout=60) as resp:

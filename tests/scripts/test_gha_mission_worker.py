@@ -48,6 +48,21 @@ def test_ask_groq_strips_think_tags(monkeypatch):
     assert answer == "Dakar"
 
 
+def test_ask_groq_sets_non_default_user_agent(monkeypatch):
+    """Groq's API 403s the default 'Python-urllib/x.y' UA as anti-abuse --
+    found live via a real GitHub Actions run. Lock the fix in."""
+    payload = json.dumps({"choices": [{"message": {"content": "Dakar"}}]}).encode()
+    captured = {}
+
+    def _fake_urlopen(request, timeout=None):
+        captured["headers"] = {k.lower(): v for k, v in request.headers.items()}
+        return _FakeResponse(payload)
+
+    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+    gha_mission_worker.ask_groq("fake-key", "capital of Senegal?")
+    assert "python-urllib" not in captured["headers"]["user-agent"].lower()
+
+
 def test_report_completion_sends_expected_payload(monkeypatch):
     captured = {}
 
