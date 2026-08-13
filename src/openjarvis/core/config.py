@@ -1459,6 +1459,14 @@ class MissionsConfig:
             "groq/llama-3.1-8b-instant",
         ]
     )
+    # Visual proof pipeline (2026-08-13, spec §31): one screenshot of
+    # whatever dev server a coding mission leaves running, sent as a
+    # Telegram photo -- automatic "when possible" (silently skipped if no
+    # server is detected), plus available on demand via the
+    # show_current_state tool. RAM-guarded: this PC hit OOM twice on local
+    # models (see D9), so a headless browser is never launched blind.
+    enable_visual_proof: bool = True
+    visual_proof_min_ram_mb: float = 1024.0
 
 
 @dataclass(slots=True)

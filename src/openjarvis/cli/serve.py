@@ -549,6 +549,21 @@ def serve(
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("Mission Telegram notify failed: %s", exc)
 
+            def _mission_photo_sender(target: str, path: str, caption: str) -> bool:
+                if channel_bridge is None or not target:
+                    return False
+                _send_photo = getattr(channel_bridge, "send_photo", None)
+                if _send_photo is None:
+                    return False  # resolved channel isn't Telegram (or too old)
+                _type, _sep, _dest = target.partition(":")
+                if not _sep or not _dest:
+                    return False
+                try:
+                    return bool(_send_photo(_dest, path, caption=caption))
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Mission Telegram photo send failed: %s", exc)
+                    return False
+
             _mdb = config.missions.db_path or str(get_config_dir() / "missions.db")
 
             # Phase 5: coding steps dispatch to a dedicated coding agent
@@ -748,6 +763,9 @@ def serve(
                 coding_agent=_coding_agent,
                 heavy_agents=_heavy_agents,
                 default_fallback_agents=_default_fallback_agents,
+                photo_sender=_mission_photo_sender,
+                enable_visual_proof=config.missions.enable_visual_proof,
+                visual_proof_min_ram_mb=config.missions.visual_proof_min_ram_mb,
             )
             mission_engine.start()
             # Post-build injection so the agent tools (launch_mission,
@@ -765,6 +783,17 @@ def serve(
                 ChooseMissionOptionTool._mission_engine = mission_engine
             except Exception as exc:  # noqa: BLE001
                 logger.debug("Mission tool injection failed: %s", exc)
+            # show_current_state: on-demand visual proof ("montre-moi
+            # l'image"), independent of the automatic post-mission capture
+            # above -- same photo_sender, so both paths behave identically.
+            try:
+                from openjarvis.tools.show_current_state import ShowCurrentStateTool
+
+                ShowCurrentStateTool._photo_sender = _mission_photo_sender
+                ShowCurrentStateTool._min_ram_mb = config.missions.visual_proof_min_ram_mb
+                console.print("  Visual proof: [cyan]show_current_state tool active[/cyan]")
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("show_current_state tool injection failed: %s", exc)
             console.print("  Missions: [cyan]active[/cyan]")
         except Exception as exc:
             logger.debug("Mission engine init failed: %s", exc)

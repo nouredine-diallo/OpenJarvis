@@ -152,6 +152,53 @@ class TelegramChannel(BaseChannel):
             logger.debug("Telegram send failed", exc_info=True)
             return False
 
+    def send_photo(
+        self,
+        channel: str,
+        photo_path: str,
+        *,
+        caption: str = "",
+        conversation_id: str = "",
+    ) -> bool:
+        """Send a local image file as a Telegram photo (``sendPhoto``).
+
+        Added for the visual-proof pipeline (2026-08-13): missions and the
+        ``show_current_state`` tool both need to deliver a screenshot as an
+        actual photo, not a wall of text -- ``send()`` only ever does
+        ``sendMessage``. Mirrors ``send()``'s chat-id/reply-to resolution.
+        """
+        if not self._token:
+            logger.warning("Cannot send photo: no Telegram bot token")
+            return False
+        try:
+            import httpx
+
+            chat_id = channel or conversation_id
+            reply_to = conversation_id if (channel and conversation_id) else ""
+            url = f"https://api.telegram.org/bot{self._token}/sendPhoto"
+            data: Dict[str, Any] = {"chat_id": chat_id}
+            if caption:
+                # Telegram photo captions are capped at 1024 chars (vs 4096
+                # for text messages) -- truncate rather than fail the send.
+                data["caption"] = caption[:1024]
+            if reply_to:
+                data["reply_to_message_id"] = reply_to
+            with open(photo_path, "rb") as fh:
+                resp = httpx.post(
+                    url, data=data, files={"photo": fh}, timeout=30.0
+                )
+            if resp.status_code >= 300:
+                logger.warning(
+                    "Telegram sendPhoto returned status %d: %s",
+                    resp.status_code,
+                    resp.text,
+                )
+                return False
+            return True
+        except Exception:
+            logger.debug("Telegram send_photo failed", exc_info=True)
+            return False
+
     def status(self) -> ChannelStatus:
         """Return the current connection status."""
         return self._status

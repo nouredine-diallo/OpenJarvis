@@ -28,6 +28,7 @@ import queue
 import threading
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Callable, Iterable, List, Optional, Set
 
 from openjarvis.core.events import EventBus, EventType
@@ -111,12 +112,23 @@ class MissionEngine:
         heavy_agent: Optional[Any] = None,
         heavy_agents: Optional[List[Any]] = None,
         default_fallback_agents: Optional[List[Any]] = None,
+        photo_sender: Optional[Callable[[str, str, str], bool]] = None,
+        enable_visual_proof: bool = True,
+        visual_proof_min_ram_mb: float = 1024.0,
     ) -> None:
         self._store = store
         self._system = system
         self._event_bus = event_bus
         # notifier(target, title, message) — e.g. wired to the Telegram bridge.
         self._notifier = notifier
+        # photo_sender(target, path, caption) -> bool -- e.g. Telegram's
+        # send_photo. Visual proof pipeline (2026-08-13): after a coding
+        # mission succeeds, best-effort screenshot of whatever dev server
+        # it left running, delivered as a photo. Silent no-op if no
+        # server is detected, RAM is tight, or this isn't wired.
+        self._photo_sender = photo_sender
+        self._enable_visual_proof = enable_visual_proof
+        self._visual_proof_min_ram_mb = visual_proof_min_ram_mb
         self._poll_interval = poll_interval
         self._backoff_base = backoff_base
         self._default_autonomy = default_autonomy
@@ -689,7 +701,58 @@ class MissionEngine:
             EventType.MISSION_END,
             {"mission_id": mission.mission_id, "verified": True},
         )
+        self._try_visual_proof(mission)
         self._notify(mission, title="MISSION TERMINÉE")
+
+    def _try_visual_proof(self, mission: Mission) -> None:
+        """Best-effort screenshot of whatever dev server a coding mission
+        left running, sent as a photo. Never raises, never delays/blocks
+        the mission's own completion -- every failure mode (disabled,
+        no photo_sender wired, no server detected, RAM too tight,
+        playwright missing, capture error) is a silent no-op, logged at
+        debug level and recorded as a mission event for auditability."""
+        if not self._enable_visual_proof or self._photo_sender is None:
+            return
+        is_coding_mission = any(
+            "coding" in (getattr(s, "required_capabilities", None) or [])
+            for s in mission.steps
+        )
+        if not is_coding_mission:
+            return
+        try:
+            from openjarvis.tools.screenshot import capture_screenshot, find_dev_server_url
+
+            evidence = "\n".join(s.result for s in mission.steps)
+            url = find_dev_server_url(evidence)
+            if not url:
+                self._append_event(
+                    mission.mission_id, "visual_proof_skipped", {"reason": "no_server_detected"}
+                )
+                return
+            out_path = str(
+                Path.home() / ".openjarvis" / "mission_artifacts" / mission.mission_id / "final.png"
+            )
+            path, reason = capture_screenshot(
+                url, out_path, min_ram_mb=self._visual_proof_min_ram_mb
+            )
+            if not path:
+                self._append_event(
+                    mission.mission_id, "visual_proof_skipped", {"reason": reason}
+                )
+                return
+            mission.artefacts.append(path)
+            self._store.save_mission(mission)
+            sent = self._photo_sender(
+                mission.requested_by, path, f"Résultat — {mission.goal[:200]}"
+            )
+            self._append_event(
+                mission.mission_id,
+                "visual_proof_captured",
+                {"url": url, "path": path, "sent": bool(sent)},
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("Visual proof capture failed", exc_info=True)
+            self._append_event(mission.mission_id, "visual_proof_skipped", {"reason": "error"})
 
     def _fail(self, mission: Mission, reason: str) -> None:
         mission.status = MissionStatus.FAILED.value

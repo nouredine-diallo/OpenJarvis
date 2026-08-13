@@ -548,6 +548,150 @@ def test_notify_includes_report_link(store):
         engine.stop()
 
 
+def test_visual_proof_captured_and_sent_when_server_detected(store, monkeypatch):
+    """A coding mission that leaves a dev server running gets a screenshot
+    captured and sent as a photo after it succeeds."""
+    calls = {"sent": []}
+
+    def _fake_find(evidence):
+        return "http://127.0.0.1:3000" if "listening" in evidence else None
+
+    def _fake_capture(url, out_path, **kwargs):
+        import pathlib
+        pathlib.Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "wb") as fh:
+            fh.write(b"\x89PNG\r\n\x1a\nfake")
+        return out_path, "ok (0.1s)"
+
+    monkeypatch.setattr("openjarvis.tools.screenshot.find_dev_server_url", _fake_find)
+    monkeypatch.setattr("openjarvis.tools.screenshot.capture_screenshot", _fake_capture)
+
+    def _photo_sender(target, path, caption):
+        calls["sent"].append((target, path, caption))
+        return True
+
+    system = FakeSystem(["Serveur démarré, listening on port 3000."])
+    engine = MissionEngine(
+        store, system, photo_sender=_photo_sender, worker_capabilities=["coding"],
+    )
+    engine.start()
+    try:
+        mission = engine.launch(
+            "Crée une page d'accueil",
+            steps=[
+                MissionStep(
+                    index=0, title="Ship", prompt="Fais 1",
+                    required_capabilities=["coding"],
+                )
+            ],
+            requested_by="telegram:1",
+        )
+        assert _wait_until(lambda: engine.status(mission.mission_id).is_terminal)
+        # _try_visual_proof runs AFTER the status checkpoint is saved (same
+        # race as the audit-event tests above) -- wait for its own evidence.
+        assert _wait_until(lambda: len(calls["sent"]) == 1)
+        done = engine.status(mission.mission_id)
+        assert done.status == MissionStatus.SUCCEEDED.value
+        target, path, caption = calls["sent"][0]
+        assert target == "telegram:1"
+        assert path.endswith("final.png")
+        assert path in done.artefacts
+        events = [e.event_type for e in store.list_events(mission.mission_id)]
+        assert "visual_proof_captured" in events
+    finally:
+        engine.stop()
+
+
+def test_visual_proof_skipped_when_no_server_detected(store, monkeypatch):
+    monkeypatch.setattr(
+        "openjarvis.tools.screenshot.find_dev_server_url", lambda evidence: None
+    )
+    calls = []
+    system = FakeSystem(["Résultat détaillé sans aucun serveur web."])
+    engine = MissionEngine(
+        store, system,
+        photo_sender=lambda t, p, c: calls.append((t, p, c)) or True,
+        worker_capabilities=["coding"],
+    )
+    engine.start()
+    try:
+        mission = engine.launch(
+            "Ajoute une fonction utilitaire",
+            steps=[
+                MissionStep(
+                    index=0, title="Ship", prompt="Fais 1",
+                    required_capabilities=["coding"],
+                )
+            ],
+        )
+        assert _wait_until(lambda: engine.status(mission.mission_id).is_terminal)
+        assert _wait_until(
+            lambda: "visual_proof_skipped"
+            in [e.event_type for e in store.list_events(mission.mission_id)]
+        )
+        assert calls == []
+    finally:
+        engine.stop()
+
+
+def test_visual_proof_skipped_for_non_coding_mission(store, monkeypatch):
+    """Research missions etc. never trigger a screenshot attempt at all --
+    not even a dev-server probe."""
+    probed = []
+    monkeypatch.setattr(
+        "openjarvis.tools.screenshot.find_dev_server_url",
+        lambda evidence: probed.append(evidence) or None,
+    )
+    calls = []
+    system = FakeSystem(["Réponse de recherche, aucun rapport avec du code."])
+    engine = MissionEngine(
+        store, system, photo_sender=lambda t, p, c: calls.append((t, p, c)) or True,
+    )
+    engine.start()
+    try:
+        mission = engine.launch(
+            "Quelle est la capitale du Sénégal ?",
+            steps=[MissionStep(index=0, title="Réponse", prompt="Fais 1")],
+        )
+        assert _wait_until(lambda: engine.status(mission.mission_id).is_terminal)
+        assert calls == []
+        assert probed == []  # never even attempted detection
+    finally:
+        engine.stop()
+
+
+def test_visual_proof_disabled_via_config(store, monkeypatch):
+    probed = []
+    monkeypatch.setattr(
+        "openjarvis.tools.screenshot.find_dev_server_url",
+        lambda evidence: probed.append(evidence) or "http://127.0.0.1:3000",
+    )
+    calls = []
+    system = FakeSystem(["Résultat."])
+    engine = MissionEngine(
+        store, system,
+        photo_sender=lambda t, p, c: calls.append((t, p, c)) or True,
+        enable_visual_proof=False,
+        worker_capabilities=["coding"],
+    )
+    engine.start()
+    try:
+        mission = engine.launch(
+            "Crée une page",
+            steps=[
+                MissionStep(
+                    index=0, title="Ship", prompt="Fais 1",
+                    required_capabilities=["coding"],
+                )
+            ],
+        )
+        assert _wait_until(lambda: engine.status(mission.mission_id).is_terminal)
+        assert calls == []
+        assert probed == []
+    finally:
+        engine.stop()
+
+
 def test_coding_step_dispatches_to_coding_agent(store):
     """Phase 5: a step with the ``coding`` capability runs through the coding
     agent (not a plain LLM answer), and non-coding steps still use the system."""
