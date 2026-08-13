@@ -214,6 +214,21 @@ class ClaudeSubscriptionAgent(BaseAgent):
             # grants access to the mission's real target repo.
             "--add-dir",
             self._workspace,
+            # Found live (2026-08-13): acceptEdits auto-approves Write/Edit
+            # but silently DENIES Bash ("permission_denials":[{"tool_name":
+            # "Bash", ...}]) -- git commands, running tests, anything via
+            # shell all get refused with no way to answer the prompt in
+            # headless mode. A whole mission (7 steps) reported "succeeded"
+            # while every step was actually just describing this denial.
+            # Reproduced and fixed empirically: acceptEdits + an explicit
+            # Bash allowlist actually runs the command (verified: real
+            # `python3 -m unittest` output came back). Deliberately not
+            # bypassPermissions/dontAsk (tried, either disables Bash
+            # entirely or is a blanket bypass of every tool, not just the
+            # one category D12's own required_capabilities=["coding"] gate
+            # already implies is expected here).
+            "--allowedTools",
+            "Bash",
         ]
         try:
             proc = subprocess.run(
