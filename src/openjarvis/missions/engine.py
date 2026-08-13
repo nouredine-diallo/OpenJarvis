@@ -50,6 +50,46 @@ _STOP = object()
 _MAX_RETRIES = 3
 
 
+class _AgentResultLike:
+    """Minimal stand-in for openjarvis.agents._stubs.AgentResult -- just
+    enough shape (.content, .metadata) for _try_agents to read."""
+
+    __slots__ = ("content", "metadata")
+
+    def __init__(self, content: str = "", metadata: Optional[dict] = None) -> None:
+        self.content = content
+        self.metadata = metadata or {}
+
+
+class SystemAskAgent:
+    """Adapts a plain ``JarvisSystem.ask()`` call to the ``.run(prompt) ->
+    result-with-.content`` interface :meth:`MissionEngine._try_agents`
+    expects -- lets a sibling free-tier system (e.g. another Groq model,
+    its own separate daily-quota pool) plug into the same fallback
+    machinery as the paid frontier tiers, at zero marginal cost. See
+    ``default_fallback_agents`` on :class:`MissionEngine`: tried before
+    ever spending Claude/Gemini subscription budget.
+    """
+
+    def __init__(self, system: Any, label: str = "") -> None:
+        self._system = system
+        self.label = label or getattr(system, "model", "") or "system"
+
+    def run(self, prompt: str) -> _AgentResultLike:
+        try:
+            result = self._system.ask(prompt, context=False)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("SystemAskAgent(%s) failed: %s", self.label, exc, exc_info=True)
+            return _AgentResultLike(metadata={"error": True, "detail": str(exc)})
+        content = (result or {}).get("content", "")
+        if not content or not str(content).strip():
+            return _AgentResultLike(metadata={"error": True, "detail": "empty result"})
+        return _AgentResultLike(content=str(content))
+
+    def __repr__(self) -> str:
+        return f"SystemAskAgent({self.label})"
+
+
 class MissionEngine:
     """Background worker that executes missions asynchronously with resume."""
 
@@ -70,6 +110,7 @@ class MissionEngine:
         coding_agent: Optional[Any] = None,
         heavy_agent: Optional[Any] = None,
         heavy_agents: Optional[List[Any]] = None,
+        default_fallback_agents: Optional[List[Any]] = None,
     ) -> None:
         self._store = store
         self._system = system
@@ -97,6 +138,13 @@ class MissionEngine:
         if heavy_agent is not None and heavy_agent not in agents:
             agents.insert(0, heavy_agent)
         self._heavy_agents: List[Any] = agents
+        # Free, zero-infra fallback tier (e.g. sibling Groq models --
+        # separate daily-quota pools from the default one) tried when the
+        # default provider fails, BEFORE ever spending Claude/Gemini
+        # subscription budget. Deliberately a separate list from
+        # heavy_agents: a prefer_heavy step wants quality first (skip
+        # straight to Claude/Gemini), not "whichever free model answers".
+        self._default_fallback_agents: List[Any] = list(default_fallback_agents or [])
         self._queue: "queue.Queue[Any]" = queue.Queue()
         self._thread: Optional[threading.Thread] = None
         self._running = threading.Event()
@@ -502,7 +550,7 @@ class MissionEngine:
         heavy_already_tried = False
         if getattr(step, "prefer_heavy", False) and self._heavy_agents:
             heavy_already_tried = True
-            content = self._try_heavy_agents(prompt)
+            content = self._try_agents(self._heavy_agents, prompt)
             if content is not None:
                 return content
             # Falls through to the normal coding_agent/system path below --
@@ -527,33 +575,39 @@ class MissionEngine:
                 raise RuntimeError("Step returned an empty result")
             return str(content)
         except Exception:
-            # Last-resort fallback for *every* step, not just prefer_heavy
-            # ones: a quota-exhausted or down default provider (observed in
-            # practice -- Groq's free-tier daily token cap) must not fail a
-            # step outright when a frontier subscription tier could still
-            # answer it. Skipped if prefer_heavy already tried the same
-            # agents above (avoids a redundant, already-failing call).
+            # The default provider failed (observed in practice -- Groq's
+            # free-tier daily token cap). Two-tier fallback, cheapest first:
+            # 1) free/zero-infra siblings (e.g. other Groq models, their own
+            #    separate quota pools) -- costs nothing, so try these before
+            #    ever spending subscription budget.
+            if self._default_fallback_agents:
+                content = self._try_agents(self._default_fallback_agents, prompt)
+                if content is not None:
+                    return content
+            # 2) the frontier tier, as an absolute last resort. Skipped if
+            #    prefer_heavy already tried the same agents above (avoids a
+            #    redundant, already-failing call).
             if not heavy_already_tried and self._heavy_agents:
-                content = self._try_heavy_agents(prompt)
+                content = self._try_agents(self._heavy_agents, prompt)
                 if content is not None:
                     return content
             raise
 
-    def _try_heavy_agents(self, prompt: str) -> Optional[str]:
-        """Best-effort call across the frontier tiers, in order (e.g. Claude
-        subscription, then Gemini subscription). Returns ``None`` (never
-        raises) once every candidate has failed, so the caller can fall
-        back to the normal coding_agent/system path cleanly. This is also
-        how work distributes across subscriptions: whichever tier is
-        logged in / under budget / not rate-limited answers first."""
-        for agent in self._heavy_agents:
+    def _try_agents(self, agents: List[Any], prompt: str) -> Optional[str]:
+        """Best-effort call across a list of candidate agents, in order.
+        Returns ``None`` (never raises) once every candidate has failed, so
+        the caller can fall through to the next tier cleanly. This is also
+        how work distributes across several free models/subscriptions:
+        whichever candidate is available/under budget/not rate-limited
+        answers first."""
+        for agent in agents:
             try:
                 result = agent.run(prompt)
             except Exception:  # noqa: BLE001
-                logger.debug("Heavy agent %r call failed, trying next", agent, exc_info=True)
+                logger.debug("Agent %r call failed, trying next", agent, exc_info=True)
                 continue
             if getattr(result, "metadata", None) and result.metadata.get("error"):
-                logger.debug("Heavy agent %r returned an error, trying next: %s", agent, result.metadata)
+                logger.debug("Agent %r returned an error, trying next: %s", agent, result.metadata)
                 continue
             content = getattr(result, "content", None) or ""
             if str(content).strip():
@@ -924,6 +978,7 @@ def _estimate_tokens(text: str) -> int:
 
 __all__ = [
     "MissionEngine",
+    "SystemAskAgent",
     "_default_steps",
     "coding_pr_steps",
     "research_steps",

@@ -685,6 +685,55 @@ def serve(
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("Missions system build failed: %s", exc)
 
+            # Free, zero-infra fallback rung: sibling Groq models have their
+            # OWN separate daily-quota pools (verified live 2026-08-12:
+            # qwen3.6-27b hit its 200k TPD cap from testing, while the other
+            # 4 Groq models were untouched). Tried before ever spending
+            # Claude/Gemini subscription budget -- same engine/tools/config
+            # as _missions_system, just a different model name, so this
+            # costs nothing extra until a fallback actually fires.
+            _default_fallback_agents: list = []
+            if config.missions.enable_groq_sibling_fallback and _missions_system is not None:
+                try:
+                    from openjarvis.missions.engine import SystemAskAgent
+                    from openjarvis.system import JarvisSystem
+
+                    for _sibling_model in config.missions.groq_sibling_models:
+                        if _sibling_model == model_name:
+                            continue
+                        try:
+                            _sibling_system = JarvisSystem(
+                                config=config,
+                                bus=bus,
+                                engine=engine,
+                                engine_key=engine_name,
+                                model=_sibling_model,
+                                agent_name="orchestrator",
+                                agent_mode="structured",
+                                interactive=config.missions.auto_approve_tools,
+                                confirm_callback=(
+                                    getattr(_missions_system, "confirm_callback", None)
+                                ),
+                                tools=getattr(_missions_system, "tools", None) or [],
+                                mcp_tools=managed_mcp_tools,
+                                _mcp_clients=mcp_clients,
+                            )
+                            _default_fallback_agents.append(
+                                SystemAskAgent(_sibling_system, label=_sibling_model)
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug(
+                                "Groq sibling %s init failed: %s", _sibling_model, exc
+                            )
+                    if _default_fallback_agents:
+                        console.print(
+                            "  Free fallback models: [cyan]"
+                            + ", ".join(a.label for a in _default_fallback_agents)
+                            + "[/cyan]"
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Groq sibling fallback init failed: %s", exc)
+
             mission_engine = MissionEngine(
                 MissionStore(_mdb),
                 _missions_system,
@@ -698,6 +747,7 @@ def serve(
                 report_base_url=config.missions.report_base_url,
                 coding_agent=_coding_agent,
                 heavy_agents=_heavy_agents,
+                default_fallback_agents=_default_fallback_agents,
             )
             mission_engine.start()
             # Post-build injection so the agent tools (launch_mission,

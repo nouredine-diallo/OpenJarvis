@@ -1446,6 +1446,19 @@ class MissionsConfig:
     # personal Gemini Pro/Ultra account, not a metered API key. Distributes
     # "heavy" work across whichever subscription is actually available.
     enable_gemini_subscription_tier: bool = True
+    # Free, zero-infra fallback rung tried BEFORE the paid subscription
+    # tiers above: sibling Groq models each have their OWN separate daily
+    # token quota (verified live 2026-08-12 -- qwen3.6-27b hit its 200k
+    # TPD cap from testing while the other Groq models were untouched).
+    # Costs nothing extra to enable; only spends anything if the default
+    # model is actually down/exhausted.
+    enable_groq_sibling_fallback: bool = True
+    groq_sibling_models: List[str] = field(
+        default_factory=lambda: [
+            "groq/openai/gpt-oss-120b",
+            "groq/llama-3.1-8b-instant",
+        ]
+    )
 
 
 @dataclass(slots=True)

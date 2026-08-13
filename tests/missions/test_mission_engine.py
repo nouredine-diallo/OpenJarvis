@@ -18,6 +18,7 @@ from openjarvis.missions import (
     MissionStatus,
 )
 from openjarvis.missions.engine import (
+    SystemAskAgent,
     _build_report,
     _default_steps,
     coding_pr_steps,
@@ -735,6 +736,118 @@ def test_default_provider_failure_falls_back_to_heavy_agent(store):
         assert "tier de secours" in done.steps[0].result
     finally:
         engine.stop()
+
+
+def test_default_provider_failure_tries_free_fallback_before_heavy(store):
+    """default_fallback_agents (e.g. a sibling Groq model, its own
+    separate free daily quota) is tried BEFORE ever spending
+    Claude/Gemini subscription budget -- only if that also fails does the
+    heavy tier get touched."""
+    system = FakeSystem(fail_substrings=("Fais",))
+    free_sibling = FakeHeavyAgent(output="Réponse d'un autre modèle Groq gratuit.")
+    heavy = FakeHeavyAgent(output="Réponse Claude -- ne devrait jamais être appelée ici.")
+    engine = MissionEngine(
+        store, system, heavy_agent=heavy, default_fallback_agents=[free_sibling]
+    )
+    engine.start()
+    try:
+        mission = engine.launch(
+            "Mission",
+            steps=[MissionStep(index=0, title="S", prompt="Fais quelque chose")],
+        )
+        assert _wait_until(lambda: engine.status(mission.mission_id).is_terminal)
+        done = engine.status(mission.mission_id)
+        assert done.status == MissionStatus.SUCCEEDED.value
+        assert len(free_sibling.calls) == 1
+        assert len(heavy.calls) == 0  # never touched -- free tier answered first
+        assert "autre modèle Groq gratuit" in done.steps[0].result
+    finally:
+        engine.stop()
+
+
+def test_default_fallback_agents_skipped_when_all_fail_then_heavy_used(store):
+    """If every free_fallback candidate also fails, the heavy tier still
+    gets its chance -- the free tier is an extra rung, not a replacement."""
+    system = FakeSystem(fail_substrings=("Fais",))
+    free_sibling = FakeHeavyAgent(fail=True)
+    heavy = FakeHeavyAgent(output="Réponse Claude -- filet de secours ultime.")
+    engine = MissionEngine(
+        store, system, heavy_agent=heavy, default_fallback_agents=[free_sibling]
+    )
+    engine.start()
+    try:
+        mission = engine.launch(
+            "Mission",
+            steps=[MissionStep(index=0, title="S", prompt="Fais quelque chose")],
+        )
+        assert _wait_until(lambda: engine.status(mission.mission_id).is_terminal)
+        done = engine.status(mission.mission_id)
+        assert done.status == MissionStatus.SUCCEEDED.value
+        assert len(free_sibling.calls) == 1
+        assert len(heavy.calls) == 1
+        assert "filet de secours ultime" in done.steps[0].result
+    finally:
+        engine.stop()
+
+
+def test_prefer_heavy_step_skips_free_fallback_goes_straight_to_heavy(store):
+    """A prefer_heavy step (e.g. code Review) wants quality, not just
+    availability -- it must go straight to the heavy tier and must NOT
+    try the free/fast sibling models first."""
+    coder = FakeCodingAgent()
+    free_sibling = FakeHeavyAgent(output="Réponse rapide mais pas assez rigoureuse.")
+    heavy = FakeHeavyAgent(output="Review approfondie du tier frontier.")
+    engine = MissionEngine(
+        store, FakeSystem(), coding_agent=coder, heavy_agent=heavy,
+        default_fallback_agents=[free_sibling], worker_capabilities=["coding"],
+    )
+    engine.start()
+    try:
+        mission = engine.launch(
+            "Mission",
+            steps=[
+                MissionStep(
+                    index=0, title="Review", prompt="Relis le diff",
+                    required_capabilities=["coding"], prefer_heavy=True,
+                )
+            ],
+        )
+        assert _wait_until(lambda: engine.status(mission.mission_id).is_terminal)
+        done = engine.status(mission.mission_id)
+        assert done.status == MissionStatus.SUCCEEDED.value
+        assert len(free_sibling.calls) == 0  # never tried -- prefer_heavy skips it
+        assert len(heavy.calls) == 1
+        assert "Review approfondie" in done.steps[0].result
+    finally:
+        engine.stop()
+
+
+def test_system_ask_agent_adapts_run_interface(tmp_path):
+    """SystemAskAgent adapts JarvisSystem.ask() to the .run(prompt) ->
+    result-with-.content interface the fallback machinery expects."""
+
+    class _FakeJarvisSystem:
+        model = "groq/llama-3.1-8b-instant"
+
+        def ask(self, query, *, context=True, **kwargs):
+            return {"content": f"réponse à: {query}"}
+
+    agent = SystemAskAgent(_FakeJarvisSystem())
+    result = agent.run("bonjour")
+    assert result.content == "réponse à: bonjour"
+    assert not result.metadata.get("error")
+    assert agent.label == "groq/llama-3.1-8b-instant"
+
+
+def test_system_ask_agent_reports_error_on_exception():
+    class _BrokenSystem:
+        def ask(self, query, *, context=True, **kwargs):
+            raise RuntimeError("quota épuisé")
+
+    agent = SystemAskAgent(_BrokenSystem(), label="groq-sibling")
+    result = agent.run("bonjour")
+    assert result.metadata.get("error") is True
+    assert result.content == ""
 
 
 def test_research_steps_plan_shape():
