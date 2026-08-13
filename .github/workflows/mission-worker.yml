@@ -1,0 +1,38 @@
+name: JARVIS cloud fallback worker
+
+# Phase A (PC-independence, see PROJET_JARVIS.md): executes a mission when
+# the PC worker is offline. Triggered either by the always-on Cloudflare
+# Worker control plane (repository_dispatch, event_type "jarvis_mission")
+# or manually for testing (workflow_dispatch).
+#
+# Runs on the standard public-repo runner, which is free and unlimited
+# (docs.github.com/actions/reference/limits) -- this workflow only exists
+# because nouredine-diallo/OpenJarvis is public.
+
+on:
+  repository_dispatch:
+    types: [jarvis_mission]
+  workflow_dispatch:
+    inputs:
+      mission_id:
+        description: "Mission ID (as recorded in the control plane's D1)"
+        required: true
+      goal:
+        description: "Mission goal / question"
+        required: true
+
+jobs:
+  run-mission:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run mission (Groq, stdlib only -- no dependency install)
+        env:
+          MISSION_ID: ${{ github.event.inputs.mission_id || github.event.client_payload.mission_id }}
+          MISSION_GOAL: ${{ github.event.inputs.goal || github.event.client_payload.goal }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          CONTROL_PLANE_URL: ${{ secrets.CONTROL_PLANE_URL }}
+          CONTROL_PLANE_SHARED_SECRET: ${{ secrets.CONTROL_PLANE_SHARED_SECRET }}
+        run: python3 scripts/gha_mission_worker.py
