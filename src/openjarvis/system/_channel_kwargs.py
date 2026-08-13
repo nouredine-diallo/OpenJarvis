@@ -13,6 +13,9 @@ def _telegram(c: Any) -> Dict[str, Any]:
         kw["allowed_chat_ids"] = c.allowed_chat_ids
     if c.parse_mode:
         kw["parse_mode"] = c.parse_mode
+    if getattr(c, "control_plane_url", ""):
+        kw["control_plane_url"] = c.control_plane_url
+        kw["control_plane_queue_poll_interval"] = c.control_plane_queue_poll_interval_seconds
     return kw
 
 

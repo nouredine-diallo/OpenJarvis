@@ -268,3 +268,126 @@ class TestChannelAgentWiring:
 
         assert len(calls_a) == 1
         assert len(calls_b) == 1
+
+
+class TestControlPlaneQueue:
+    """Tests for Phase B's queue-poll transport (control_plane_url set) --
+    an alternative to Telegram long polling, used once Telegram is
+    webhooked to the control plane (only one consumption mode is allowed
+    at a time)."""
+
+    class _FakeResponse:
+        def __init__(self, status_code=200, payload=None):
+            self.status_code = status_code
+            self._payload = payload or {}
+
+        def json(self):
+            return self._payload
+
+    def test_connect_uses_queue_loop_when_control_plane_url_set(self):
+        ch = TelegramChannel(
+            bot_token="tok", control_plane_url="https://example.workers.dev"
+        )
+        with patch.object(ch, "_queue_poll_loop") as fake_loop, patch.object(
+            ch, "_poll_loop"
+        ) as fake_poll:
+            ch.connect()
+            ch._listener_thread.join(timeout=1.0)
+        fake_poll.assert_not_called()
+        assert ch.status() == ChannelStatus.CONNECTED
+
+    def test_connect_uses_long_polling_when_control_plane_url_unset(self):
+        ch = TelegramChannel(bot_token="tok")
+        with patch.object(ch, "_poll_loop") as fake_poll:
+            ch.connect()
+            ch._listener_thread.join(timeout=1.0)
+        fake_poll.assert_called_once()
+
+    def test_queue_loop_dispatches_message_to_handlers(self):
+        ch = TelegramChannel(
+            bot_token="tok",
+            control_plane_url="https://example.workers.dev",
+            control_plane_shared_secret="shh",
+            control_plane_queue_poll_interval=0.01,
+        )
+        received = []
+        ch.on_message(lambda cm: received.append(cm))
+
+        payload = {
+            "messages": [
+                {
+                    "sender_id": "6468865487",
+                    "chat_id": "6468865487",
+                    "message_id": "42",
+                    "content": "hello from queue",
+                }
+            ]
+        }
+        calls = {"n": 0}
+
+        def _fake_get(url, headers=None, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                assert url == "https://example.workers.dev/telegram-queue"
+                assert headers["x-control-plane-secret"] == "shh"
+                return self._FakeResponse(200, payload)
+            ch._stop_event.set()
+            return self._FakeResponse(200, {"messages": []})
+
+        with patch("httpx.get", side_effect=_fake_get):
+            ch._queue_poll_loop()
+
+        assert len(received) == 1
+        assert received[0].content == "hello from queue"
+        assert received[0].conversation_id == "6468865487"
+
+    def test_queue_loop_respects_allowed_chat_ids(self):
+        ch = TelegramChannel(
+            bot_token="tok",
+            control_plane_url="https://example.workers.dev",
+            allowed_chat_ids="111",
+            control_plane_queue_poll_interval=0.01,
+        )
+        received = []
+        ch.on_message(lambda cm: received.append(cm))
+
+        payload = {
+            "messages": [
+                {"sender_id": "999", "chat_id": "999", "message_id": "1", "content": "nope"}
+            ]
+        }
+        calls = {"n": 0}
+
+        def _fake_get(url, headers=None, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return self._FakeResponse(200, payload)
+            ch._stop_event.set()
+            return self._FakeResponse(200, {"messages": []})
+
+        with patch("httpx.get", side_effect=_fake_get):
+            ch._queue_poll_loop()
+
+        assert received == []
+
+    def test_queue_loop_survives_network_errors(self):
+        """A transient failure to reach the control plane must not crash the
+        loop -- it just retries on the next poll tick."""
+        ch = TelegramChannel(
+            bot_token="tok",
+            control_plane_url="https://example.workers.dev",
+            control_plane_queue_poll_interval=0.01,
+        )
+        calls = {"n": 0}
+
+        def _fake_get(url, headers=None, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ConnectionError("network down")
+            ch._stop_event.set()
+            return self._FakeResponse(200, {"messages": []})
+
+        with patch("httpx.get", side_effect=_fake_get):
+            ch._queue_poll_loop()  # must not raise
+
+        assert calls["n"] == 2

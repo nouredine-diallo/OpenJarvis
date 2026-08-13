@@ -46,6 +46,9 @@ class TelegramChannel(BaseChannel):
         allowed_chat_ids: str = "",
         parse_mode: str = "Markdown",
         bus: Optional[EventBus] = None,
+        control_plane_url: str = "",
+        control_plane_shared_secret: str = "",
+        control_plane_queue_poll_interval: float = 3.0,
     ) -> None:
         self._token = bot_token or os.environ.get("TELEGRAM_BOT_TOKEN", "")
         self._allowed_chat_ids = allowed_chat_ids
@@ -55,11 +58,23 @@ class TelegramChannel(BaseChannel):
         self._status = ChannelStatus.DISCONNECTED
         self._listener_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        # Phase B: when set, Telegram is expected to be webhooked to the
+        # control plane (Telegram only allows one consumption mode at a
+        # time), so incoming messages are pulled from its queue instead of
+        # python-telegram-bot's getUpdates long polling. Empty (the
+        # default) keeps today's polling behavior completely unchanged.
+        self._control_plane_url = control_plane_url
+        self._control_plane_secret = control_plane_shared_secret or os.environ.get(
+            "CONTROL_PLANE_SHARED_SECRET", ""
+        )
+        self._control_plane_queue_poll_interval = control_plane_queue_poll_interval
 
     # -- connection lifecycle ---------------------------------------------------
 
     def connect(self) -> None:
-        """Start listening for incoming messages via long polling."""
+        """Start listening for incoming messages: via the control plane's
+        queue (Phase B, when configured) or Telegram long polling (default,
+        unchanged behavior)."""
         if not self._token:
             logger.warning("No Telegram bot token configured")
             self._status = ChannelStatus.ERROR
@@ -67,6 +82,19 @@ class TelegramChannel(BaseChannel):
 
         self._stop_event.clear()
         self._status = ChannelStatus.CONNECTING
+
+        if self._control_plane_url:
+            self._listener_thread = threading.Thread(
+                target=self._queue_poll_loop,
+                daemon=True,
+            )
+            self._listener_thread.start()
+            self._status = ChannelStatus.CONNECTED
+            logger.info(
+                "Telegram channel connected (control plane queue: %s)",
+                self._control_plane_url,
+            )
+            return
 
         try:
             from telegram.ext import ApplicationBuilder  # noqa: F401
@@ -265,6 +293,73 @@ class TelegramChannel(BaseChannel):
         except Exception:
             logger.debug("Telegram poll loop error", exc_info=True)
             self._status = ChannelStatus.ERROR
+
+    def _queue_poll_loop(self) -> None:
+        """Phase B: pull pending messages from the control plane's queue
+        instead of long-polling Telegram directly (fed by Telegram's
+        webhook -> the Worker -> D1). Builds the exact same ChannelMessage
+        and calls the exact same handlers as _poll_loop -- tools, mission
+        engine, memory are all unchanged, only how the message arrives
+        differs. Replies still go straight to Telegram's API via send(),
+        not through the control plane.
+
+        The allow-list gate already happened at the Worker (same secret,
+        same TELEGRAM_OWNER_ID check) before a message ever reaches this
+        queue, but it's re-checked here too -- defense in depth, and it's
+        what keeps this method's behavior identical to _poll_loop's own
+        allow-list check rather than blindly trusting the network hop.
+        """
+        import httpx
+
+        url = self._control_plane_url.rstrip("/") + "/telegram-queue"
+        headers = {
+            "x-control-plane-secret": self._control_plane_secret,
+            "user-agent": "JARVIS-PC-Worker/1.0",
+        }
+        allowed = {
+            cid.strip() for cid in self._allowed_chat_ids.split(",") if cid.strip()
+        }
+
+        while not self._stop_event.is_set():
+            try:
+                resp = httpx.get(url, headers=headers, timeout=10.0)
+                if resp.status_code == 200:
+                    for m in resp.json().get("messages", []):
+                        cm = ChannelMessage(
+                            channel="telegram",
+                            sender=str(m.get("sender_id", "")),
+                            content=m.get("content", ""),
+                            message_id=str(m.get("message_id", "")),
+                            conversation_id=str(m.get("chat_id", "")),
+                        )
+                        if allowed and cm.conversation_id not in allowed:
+                            logger.debug(
+                                "Ignoring queued message from unlisted chat %s",
+                                cm.conversation_id,
+                            )
+                            continue
+                        for handler in self._handlers:
+                            try:
+                                handler(cm)
+                            except Exception:
+                                logger.exception("Telegram queue handler error")
+                        if self._bus is not None:
+                            self._bus.publish(
+                                EventType.CHANNEL_MESSAGE_RECEIVED,
+                                {
+                                    "channel": cm.channel,
+                                    "sender": cm.sender,
+                                    "content": cm.content,
+                                    "message_id": cm.message_id,
+                                },
+                            )
+                else:
+                    logger.debug(
+                        "Telegram queue poll returned status %d", resp.status_code
+                    )
+            except Exception:
+                logger.debug("Telegram queue poll failed", exc_info=True)
+            self._stop_event.wait(self._control_plane_queue_poll_interval)
 
     def _publish_sent(self, channel: str, content: str, conversation_id: str) -> None:
         """Publish a CHANNEL_MESSAGE_SENT event on the bus."""

@@ -1108,6 +1108,13 @@ class TelegramChannelConfig:
     bot_token: str = ""
     allowed_chat_ids: str = ""
     parse_mode: str = "Markdown"
+    # Phase B (PC-independence, PROJET_JARVIS.md): when set, incoming
+    # messages are pulled from the control plane's queue instead of
+    # Telegram's own getUpdates long polling -- required once Telegram is
+    # webhooked to the control plane, since it only allows one consumption
+    # mode at a time. Empty (the default) keeps polling, unchanged.
+    control_plane_url: str = ""
+    control_plane_queue_poll_interval_seconds: float = 3.0
 
 
 @dataclass(slots=True)
