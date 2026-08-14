@@ -815,6 +815,17 @@ def serve(
                     console.print("  Data backup: [cyan]active (GitHub, privé)[/cyan]")
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("Data backup service init failed: %s", exc)
+            # deep_web_research needs the engine to plan sub-queries and
+            # synthesize; injected post-build like the mission tools.
+            try:
+                from openjarvis.tools.web_research import DeepWebResearchTool
+
+                DeepWebResearchTool._engine = engine
+                DeepWebResearchTool._model = model_name
+                console.print("  Deep web research: [cyan]active[/cyan]")
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("deep_web_research injection failed: %s", exc)
+
             # show_current_state: on-demand visual proof ("montre-moi
             # l'image"), independent of the automatic post-mission capture
             # above -- same photo_sender, so both paths behave identically.

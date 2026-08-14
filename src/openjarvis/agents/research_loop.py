@@ -3,7 +3,7 @@
 A small, self-contained planner-executor loop:
 
 * the planner is supplied by the caller (the web endpoint resolves it from
-  config, falling back to ``gemma4:31b`` on Ollama for legacy installs),
+  config, falling back to the default cloud model below),
 * the only tool it can call is :meth:`HybridSearch.search`,
 * it gets up to ``max_iterations`` tool calls,
 * tool results are trimmed before re-entering the context window, and
@@ -31,7 +31,12 @@ from openjarvis.engine._base import InferenceEngine
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_PLANNER_MODEL = "gemma4:31b"
+# Was "gemma4:31b" (Ollama): a leftover from the local-model era, which
+# this project abandoned after repeated OOM kills on a 7.6 GB no-GPU
+# machine (PLAN.md D9). Ollama is not installed, so that default could
+# only ever fail; point it at the same free Groq model the rest of the
+# engine defaults to.
+DEFAULT_PLANNER_MODEL = "groq/qwen/qwen3.6-27b"
 
 
 CLARIFY_TOOL_SPEC: Dict[str, Any] = {
@@ -462,7 +467,7 @@ class ResearchAgent:
     search:
         The HybridSearch instance the planner can call.
     model:
-        Planner model tag (default ``gemma4:31b``).
+        Planner model tag (default ``groq/qwen/qwen3.6-27b``).
     max_iterations:
         Hard ceiling on tool calls before the loop is forced into synthesis.
     temperature, max_tokens, num_ctx:

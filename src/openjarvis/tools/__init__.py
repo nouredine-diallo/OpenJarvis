@@ -167,4 +167,14 @@ try:
 except ImportError:
     pass
 
+try:
+    import openjarvis.tools.github_search  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.web_research  # noqa: F401
+except ImportError:
+    pass
+
 __all__ = ["BaseTool", "ToolExecutor", "ToolSpec"]

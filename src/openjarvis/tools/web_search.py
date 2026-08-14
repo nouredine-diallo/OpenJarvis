@@ -13,17 +13,30 @@ from openjarvis.tools._stubs import BaseTool, ToolSpec
 
 logger = logging.getLogger(__name__)
 
+#: Forced DDG locale -- see _duckduckgo_search.
+_DDG_REGION = "fr-fr"
+_SEARXNG_TIMEOUT_S = 15.0
+
 
 @ToolRegistry.register("web_search")
 class WebSearchTool(BaseTool):
-    """Search the web via Tavily API."""
+    """Search the web: SearXNG (preferred) → Tavily → DuckDuckGo."""
 
     tool_id = "web_search"
     is_local = False
 
-    def __init__(self, api_key: str | None = None, max_results: int = 5):
+    def __init__(
+        self,
+        api_key: str | None = None,
+        max_results: int = 5,
+        searxng_url: str = "",
+    ):
         self._api_key = api_key or os.environ.get("TAVILY_API_KEY")
         self._max_results = max_results
+        # SearXNG is opt-in by URL: unset means the tool behaves exactly
+        # as it did before (Tavily → DDG), so nothing breaks for an
+        # instance that never starts the container.
+        self._searxng_url = searxng_url or os.environ.get("SEARXNG_URL", "")
 
     @property
     def spec(self) -> ToolSpec:
@@ -115,12 +128,58 @@ class WebSearchTool(BaseTool):
             text = text[:max_chars] + "\n\n[Content truncated]"
         return text
 
+    def _searxng_search(self, query: str, max_results: int) -> tuple[str, int]:
+        """Search via a self-hosted SearXNG instance (JSON API).
+
+        Preferred backend (Brique 3, docs/SPEC_BRIQUE3_RECHERCHE.md):
+        multi-source (Google/Bing/GitHub/StackOverflow/HN/arXiv/Wikipedia),
+        free, self-hosted, and measured faster than DDG alone
+        (0.45-0.85 s/req vs 2.16 s) for ~120 MB of RAM -- negligible next
+        to this project's heavy pipelines.
+
+        Integration trap worth knowing: SearXNG's *own* DuckDuckGo engine
+        returns 0 results. That is exactly why DDG stays wired as a
+        **direct** fallback (ddgs) rather than as a SearXNG engine.
+        """
+        import httpx
+
+        resp = httpx.get(
+            self._searxng_url.rstrip("/") + "/search",
+            params={"q": query, "format": "json"},
+            timeout=_SEARXNG_TIMEOUT_S,
+        )
+        resp.raise_for_status()
+        results = (resp.json().get("results") or [])[:max_results]
+
+        parts = []
+        for r in results:
+            title = r.get("title", "Untitled")
+            url = r.get("url", "")
+            snippet = r.get("content", "") or ""
+            engines = ", ".join(r.get("engines") or []) or r.get("engine", "")
+            suffix = f"\nEngines: {engines}" if engines else ""
+            parts.append(f"### {title}\nSource: {url}\nSummary: {snippet}{suffix}")
+        return "\n\n---\n\n".join(parts), len(results)
+
     def _duckduckgo_search(self, query: str, max_results: int) -> str:
-        """Search using DuckDuckGo as fallback."""
+        """Search using DuckDuckGo as a direct fallback.
+
+        Locale is forced to French (Brique 3 decision): DDG otherwise
+        defaults to English results, the wrong default for a user who
+        talks to JARVIS in French. SearXNG needs no equivalent -- it is
+        locale-agnostic by construction.
+        """
         from ddgs import DDGS
 
         ddgs = DDGS()
-        raw_results = list(ddgs.text(query, max_results=max_results))
+        try:
+            raw_results = list(
+                ddgs.text(query, max_results=max_results, region=_DDG_REGION)
+            )
+        except TypeError:
+            # ddgs versions differ on the region kwarg name; getting the
+            # results at all matters more than the locale hint.
+            raw_results = list(ddgs.text(query, max_results=max_results))
         results = []
         for r in raw_results:
             title = r.get("title", "Untitled")
@@ -159,6 +218,25 @@ class WebSearchTool(BaseTool):
                 )
 
         max_results = params.get("max_results", self._max_results)
+
+        # Preferred backend: self-hosted SearXNG (free, multi-source,
+        # faster than DDG alone). Falls through to Tavily/DDG below on any
+        # failure, so a stopped container degrades instead of breaking.
+        if self._searxng_url:
+            try:
+                formatted, count = self._searxng_search(query, max_results)
+                if count:
+                    return ToolResult(
+                        tool_name="web_search",
+                        content=formatted,
+                        success=True,
+                        metadata={"engine": "searxng", "num_results": count},
+                    )
+                logger.debug("SearXNG returned no results, falling through")
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "SearXNG error (%s), falling back", type(exc).__name__
+                )
 
         try:
             from tavily import TavilyClient
