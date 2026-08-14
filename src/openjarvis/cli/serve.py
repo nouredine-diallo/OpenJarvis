@@ -803,6 +803,18 @@ def serve(
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("Control plane heartbeat init failed: %s", exc)
+
+            if config.missions.enable_data_backup:
+                try:
+                    from openjarvis.tools.data_backup import DataBackupService
+
+                    _data_backup = DataBackupService(
+                        interval_seconds=config.missions.data_backup_interval_seconds,
+                    )
+                    _data_backup.start()
+                    console.print("  Data backup: [cyan]active (GitHub, privé)[/cyan]")
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Data backup service init failed: %s", exc)
             # show_current_state: on-demand visual proof ("montre-moi
             # l'image"), independent of the automatic post-mission capture
             # above -- same photo_sender, so both paths behave identically.

@@ -103,3 +103,58 @@ def test_filters_non_fact_tokens():
     engine = FakeEngine('["none", "N/A", "Real fact"]')
     extractor = FactExtractor(engine, "m")
     assert extractor.extract("x", "y") == ["Real fact"]
+
+
+# -- reasoning/narration pollution (found live 2026-08-14) -------------------
+# The live fact store had filled up with the model's own reasoning instead of
+# durable facts ("User says: ...", "Does it contain a stable preference? No.").
+# Root cause: qwen3.6-27b emits <think>...</think> inline, which reached the
+# line-based fallback, and every reasoning line became a "fact".
+
+
+def test_strips_think_block_before_parsing():
+    engine = FakeEngine(
+        '<think>User says X. Is it a preference? No, wait, yes.</think>'
+        '[{"kind": "preference", "text": "Prefers dark mode"}]'
+    )
+    extractor = FactExtractor(engine, "m")
+    facts = extractor.extract_typed("x", "y")
+    assert [f.text for f in facts] == ["Prefers dark mode"]
+
+
+def test_reasoning_prose_does_not_become_facts():
+    """The exact failure mode observed live: no JSON at all, just prose
+    reasoning -- which must yield nothing rather than a store full of junk."""
+    engine = FakeEngine(
+        "User says: '[TEST] read this PDF'\n"
+        "Does it contain a stable preference? No.\n"
+        "The assistant responds explaining it cannot access local files.\n"
+        "No explicit preferences, facts, decisions, or rules are stated.\n"
+    )
+    extractor = FactExtractor(engine, "m")
+    assert extractor.extract_typed("x", "y") == []
+
+
+def test_narration_filtered_out_of_json_output_too():
+    """Narration must be rejected even when correctly JSON-wrapped -- the
+    filter belongs to _clean_fact, not just the line fallback."""
+    engine = FakeEngine(
+        '[{"kind": "fact", "text": "User says: hello there"},'
+        ' {"kind": "preference", "text": "Prefers concise French answers"}]'
+    )
+    extractor = FactExtractor(engine, "m")
+    facts = extractor.extract_typed("x", "y")
+    assert [f.text for f in facts] == ["Prefers concise French answers"]
+
+
+def test_real_facts_survive_the_filter():
+    """Guard against over-filtering: these are real entries from the live
+    store and must all be kept."""
+    engine = FakeEngine(
+        '["Prefere les reponses courtes en francais",'
+        ' "Ne deploie jamais un vendredi",'
+        ' "Travaille sur le projet JARVIS avec 5 briques",'
+        ' "A choisi sqlite-vec pour la memoire semantique"]'
+    )
+    extractor = FactExtractor(engine, "m")
+    assert len(extractor.extract("x", "y")) == 4

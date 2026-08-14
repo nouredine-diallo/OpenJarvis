@@ -1483,6 +1483,12 @@ class MissionsConfig:
     # this file.
     control_plane_url: str = ""
     control_plane_heartbeat_interval_seconds: float = 30.0
+    # Periodic cloud backup of irreplaceable local data (memory, fact
+    # store, mission/conversation history) to a private GitHub repo. The
+    # engine's code has been backed up since 2026-08-13; its data was the
+    # last unprotected single point of failure.
+    enable_data_backup: bool = True
+    data_backup_interval_seconds: float = 3600.0
 
 
 @dataclass(slots=True)

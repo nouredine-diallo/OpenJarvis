@@ -58,6 +58,101 @@ _DEFAULT_TYPED_SYSTEM_PROMPT = (
 )
 
 
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+#: Openers that mark a line as the model *narrating the exchange* rather
+#: than stating a durable fact about the user. Collected from real
+#: polluted entries found in the live fact store on 2026-08-14.
+_NARRATION_PREFIXES = (
+    "user says",
+    "user asks",
+    "user mentions",
+    "the user says",
+    "the user asks",
+    "the user mentions",
+    "assistant:",
+    "the assistant",
+    "assistant explains",
+    "assistant responds",
+    "this is a test",
+    "this response",
+    "this exchange",
+    "the prompt",
+    "no explicit",
+    "nothing worth",
+    "there is nothing",
+    "no durable",
+    "no preferences",
+    "it asks",
+    "offers to",
+    "notes that",
+    "here's a",
+    "here is a",
+    "okay,",
+    "let me",
+    "i need to",
+    "wait,",
+    # Descriptions *of the exchange* rather than facts about the user's
+    # world. Kept as full phrases on purpose: a bare "the user's" prefix
+    # would also reject legitimate entries like "The user's laptop has
+    # 7.6 GB of RAM".
+    "the conversation",
+    "the user said",
+    "the user's input",
+    "this is a factual statement",
+    "user provides",
+    "the url is",
+)
+
+
+def _strip_reasoning(content: str) -> str:
+    """Remove <think>...</think> blocks.
+
+    The default model (qwen3.6-27b) emits its chain of thought inline in
+    exactly this form. Left in place, that reasoning reaches the
+    line-based fallback below and every sentence of it gets stored as a
+    "durable fact" -- which is precisely how the live fact store ended up
+    full of "Does it contain a stable preference? No.". The same fix was
+    already needed in the Cloudflare control plane's /ask endpoint; this
+    is the same model behaviour biting a second code path.
+    """
+    return _THINK_RE.sub("", content or "")
+
+
+def _looks_like_narration(text: str) -> bool:
+    """True when *text* reads as commentary about the conversation rather
+    than a durable fact worth remembering.
+
+    Deliberately conservative in what it *rejects* on top of the prefix
+    list: only questions (a fact is never a question) and the model's
+    explicit "nothing to store" answers, both of which are worthless as
+    memory by construction and were observed live.
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return True
+    lowered = stripped.lower()
+    if lowered.startswith(_NARRATION_PREFIXES):
+        return True
+    # A durable fact is a declarative statement, so it contains no question
+    # mark anywhere -- not just at the end. Checking only the end let the
+    # model's self-Q&A reasoning through verbatim ("Does it contain a stable
+    # preference? No."), which is exactly the shape that polluted the live
+    # store. Facts that legitimately embed a question are vanishingly rare
+    # next to reasoning text, which is full of them.
+    if "?" in stripped:
+        return True
+    # Leftover reasoning markup: a durable fact never carries think tags.
+    if "<think>" in lowered or "</think>" in lowered:
+        return True
+    # A label/heading ("**Analyze User Input:**", "Step 2:") introduces
+    # content rather than being content -- real entries found in the live
+    # store came from the model's own markdown reasoning headers.
+    if stripped.rstrip("*").endswith(":"):
+        return True
+    return False
+
+
 class FactExtractor:
     """Extract memory-worthy facts from a conversation turn via an engine."""
 
@@ -180,6 +275,8 @@ class FactExtractor:
 
     def _coerce_to_list(self, content: str) -> List[str]:
         """Best-effort conversion of model output to a list of strings."""
+        content = _strip_reasoning(content)
+
         # 1. Try to locate and parse a JSON array anywhere in the output
         #    (models often wrap it in prose or code fences).
         match = re.search(r"\[.*\]", content, re.DOTALL)
@@ -193,12 +290,19 @@ class FactExtractor:
                 pass
 
         # 2. Fall back to line-based parsing (markdown bullets / numbered).
+        #    Deliberately conservative: see _looks_like_narration. Found
+        #    live (2026-08-14) polluting the real fact store -- when the
+        #    model answers in prose instead of JSON, every line of its
+        #    reasoning was being stored as a "durable fact" ("User says:
+        #    ...", "Does it contain a stable preference? No.").
         items: List[str] = []
         for line in content.splitlines():
             line = line.strip()
             if not line:
                 continue
             line = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line)
+            if _looks_like_narration(line):
+                continue
             items.append(line)
         return items
 
@@ -206,6 +310,8 @@ class FactExtractor:
         fact = str(item).strip().strip("\"'").strip()
         # Drop obvious non-facts the model sometimes emits.
         if not fact or fact.lower() in ("[]", "none", "n/a", "null"):
+            return ""
+        if _looks_like_narration(fact):
             return ""
         if len(fact) > self._max_fact_chars:
             fact = fact[: self._max_fact_chars].rstrip()
