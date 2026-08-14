@@ -1489,6 +1489,10 @@ class MissionsConfig:
     # last unprotected single point of failure.
     enable_data_backup: bool = True
     data_backup_interval_seconds: float = 3600.0
+    # Brique 5 adaptive quality gate: for coding missions this really runs
+    # ruff/bandit/pytest in a sandbox before a mission may be called done.
+    enable_quality_gate: bool = True
+    enable_gate_sandbox: bool = True
 
 
 @dataclass(slots=True)

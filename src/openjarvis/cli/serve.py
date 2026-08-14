@@ -765,6 +765,8 @@ def serve(
                 photo_sender=_mission_photo_sender,
                 enable_visual_proof=config.missions.enable_visual_proof,
                 visual_proof_min_ram_mb=config.missions.visual_proof_min_ram_mb,
+                enable_quality_gate=config.missions.enable_quality_gate,
+                enable_gate_sandbox=config.missions.enable_gate_sandbox,
             )
             mission_engine.start()
             # Post-build injection so the agent tools (launch_mission,

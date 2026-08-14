@@ -115,6 +115,9 @@ class MissionEngine:
         photo_sender: Optional[Callable[[str, str, str], bool]] = None,
         enable_visual_proof: bool = True,
         visual_proof_min_ram_mb: float = 1024.0,
+        enable_quality_gate: bool = True,
+        enable_gate_sandbox: bool = True,
+        quality_gate_project_dir: str = "",
     ) -> None:
         self._store = store
         self._system = system
@@ -129,6 +132,10 @@ class MissionEngine:
         self._photo_sender = photo_sender
         self._enable_visual_proof = enable_visual_proof
         self._visual_proof_min_ram_mb = visual_proof_min_ram_mb
+        # Brique 5 adaptive quality gate (see missions/quality_gate.py).
+        self._enable_quality_gate = enable_quality_gate
+        self._enable_gate_sandbox = enable_gate_sandbox
+        self._quality_gate_project_dir = quality_gate_project_dir
         self._poll_interval = poll_interval
         self._backoff_base = backoff_base
         self._default_autonomy = default_autonomy
@@ -734,6 +741,26 @@ class MissionEngine:
         mission.verification = run_verification(mission)
         verified = bool(mission.verification.get("verified"))
 
+        # Brique 5: on top of the structural checks above, run the gate
+        # appropriate to what this mission actually was -- for code that
+        # means really executing ruff/bandit/pytest in a sandbox, so
+        # "les tests sont verts" stops being something a model can simply
+        # assert. Failing the gate fails the mission, exactly like the
+        # structural verification.
+        gate = self._run_quality_gate(mission)
+        if gate is not None:
+            mission.verification["quality_gate"] = gate.as_dict()
+            if not gate.passed:
+                verified = False
+
+        # An explicit human override can still let a mission through, but
+        # only when a reason was recorded (via give_feedback/choose) --
+        # never silently, and never by the model itself.
+        override = (mission.metadata or {}).get("override_reason", "")
+        if not verified and override:
+            verified = True
+            mission.verification["overridden_by_human"] = override
+
         if not verified:
             mission.status = MissionStatus.FAILED.value
             self._store.save_mission(mission)
@@ -843,6 +870,26 @@ class MissionEngine:
         except Exception:  # noqa: BLE001
             logger.debug("Visual proof capture failed", exc_info=True)
             self._append_event(mission.mission_id, "visual_proof_skipped", {"reason": "error"})
+
+    def _run_quality_gate(self, mission: Mission):
+        """Run the adaptive quality gate. Never raises -- a gate that
+        crashes must not take the mission down with it, but it also must
+        not silently pass: an internal error surfaces as a failed check
+        (see quality_gate.run_quality_gate)."""
+        if not self._enable_quality_gate:
+            return None
+        try:
+            from openjarvis.missions.quality_gate import run_quality_gate
+
+            return run_quality_gate(
+                mission,
+                project_dir=(mission.metadata or {}).get("workspace", "")
+                or self._quality_gate_project_dir,
+                enable_sandbox_checks=self._enable_gate_sandbox,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("Quality gate execution failed", exc_info=True)
+            return None
 
     def _try_backup_artifact(self, mission: Mission, local_path: str) -> None:
         """Fire-and-forget: push the artefact to the permanent GitHub
