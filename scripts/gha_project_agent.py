@@ -41,13 +41,18 @@ from typing import Any, Dict, List, Optional
 
 GROQ_MODEL = "qwen/qwen3.6-27b"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-# Groq free tier allows 8k tokens/minute, and its request size limit
-# rejected a 60k-char context outright (HTTP 413, found live on the
-# first real run against this very repo). ~18k chars is roughly 4.5k
-# tokens, which leaves room for the answer inside one minute's budget.
-# Large repos are therefore analysed on a truncated view -- said out
-# loud in the prompt below rather than silently pretending otherwise.
-MAX_CONTEXT_CHARS = 18_000
+# Groq returns HTTP 413 when a SINGLE request exceeds the free tier's
+# 8k tokens-per-minute budget -- not just when the body is physically
+# large. Found live: 60k chars failed, then 18k+tree still failed,
+# because input AND requested output count against the same minute.
+# ~8k chars of context (~2k tokens) + a 1.5k-token answer leaves
+# headroom. This is a real ceiling of the zero-cost path: big repos
+# are read partially, and the prompt says so out loud rather than
+# letting the model answer as if it had seen everything.
+MAX_CONTEXT_CHARS = 8_000
+MAX_TREE_CHARS = 2_500
+# input + requested output must both fit inside ONE minute's 8k budget.
+ANSWER_TOKENS = 1_536
 UA = "JARVIS-GHA-ProjectAgent/1.0"
 
 
@@ -74,7 +79,7 @@ def strip_reasoning(text: str) -> str:
     return re.sub(r"<think>.*\Z", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
 
 
-def ask_groq(api_key: str, system: str, user: str, *, max_tokens: int = 4096) -> str:
+def ask_groq(api_key: str, system: str, user: str, *, max_tokens: int = ANSWER_TOKENS) -> str:
     body = json.dumps(
         {
             "model": GROQ_MODEL,
@@ -96,6 +101,7 @@ def ask_groq(api_key: str, system: str, user: str, *, max_tokens: int = 4096) ->
             "user-agent": UA,  # Groq 403s the default urllib UA
         },
     )
+    log(f"groq request: ~{len(system) + len(user)} chars in, {max_tokens} tokens out")
     with urllib.request.urlopen(req, timeout=120) as resp:
         payload = json.loads(resp.read())
     return strip_reasoning(payload["choices"][0]["message"]["content"])
@@ -116,7 +122,7 @@ def build_context(repo_dir: str) -> str:
         text = out.read_text(encoding="utf-8", errors="replace")
         out.unlink(missing_ok=True)
         if len(text) > MAX_CONTEXT_CHARS:
-            tree = run(["git", "ls-files"], cwd=repo_dir).stdout[:6000]
+            tree = run(["git", "ls-files"], cwd=repo_dir).stdout[:MAX_TREE_CHARS]
             text = (
                 text[:MAX_CONTEXT_CHARS]
                 + "\n\n[CONTEXTE TRONQUÉ — dépôt trop gros pour être lu en entier. "
@@ -182,7 +188,7 @@ def do_implement(repo_dir: str, task: str, objective: str, api_key: str) -> Dict
         prompt += f"OBJECTIF FINAL :\n{objective}\n\n"
     prompt += f"TÂCHE À IMPLÉMENTER :\n{task}"
 
-    patch = ask_groq(api_key, IMPLEMENT_SYSTEM, prompt, max_tokens=8192)
+    patch = ask_groq(api_key, IMPLEMENT_SYSTEM, prompt, max_tokens=ANSWER_TOKENS)
     if patch.startswith("IMPOSSIBLE:"):
         return {"applied": False, "reason": patch, "patch": ""}
 
