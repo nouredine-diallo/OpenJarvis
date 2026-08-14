@@ -17,7 +17,8 @@ import logging
 import threading
 import urllib.error
 import urllib.request
-from typing import Iterable, Optional
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,57 @@ def send_heartbeat(
         return False
 
 
+def sync_memory(
+    control_plane_url: str,
+    shared_secret: str,
+    *,
+    facts_path: str = "",
+    timeout: float = 15.0,
+) -> int:
+    """Push the local fact store to the control plane so the cloud path
+    knows the user when the PC is off.
+
+    Without this the offline assistant answers as a stranger -- it is what
+    turns "PC éteint" from a downgrade into a continuation of the same
+    JARVIS. Best-effort: returns the number of facts sent, 0 on any
+    failure, never raises.
+    """
+    path = Path(facts_path) if facts_path else Path.home() / ".openjarvis" / "memory_facts.jsonl"
+    if not path.exists():
+        return 0
+    try:
+        facts: List[Dict[str, Any]] = []
+        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines()):
+            line = line.strip()
+            if not line:
+                continue
+            entry = json.loads(line)
+            text = (entry.get("text") or "").strip()
+            if text:
+                facts.append({"id": str(i), "kind": entry.get("kind", "fact"), "text": text})
+    except Exception:  # noqa: BLE001
+        logger.debug("Could not read fact store for cloud sync", exc_info=True)
+        return 0
+
+    request = urllib.request.Request(
+        control_plane_url.rstrip("/") + "/memory/sync",
+        data=json.dumps({"facts": facts}).encode(),
+        method="POST",
+        headers={
+            "content-type": "application/json",
+            "x-control-plane-secret": shared_secret,
+            "user-agent": "JARVIS-PC-Worker/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            if 200 <= resp.status < 300:
+                return len(facts)
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError):
+        logger.debug("Cloud memory sync failed", exc_info=True)
+    return 0
+
+
 class ControlPlaneHeartbeat:
     """Background thread sending periodic heartbeats. Never raises out of
     the thread; stop() is idempotent and joins with a short timeout."""
@@ -87,6 +139,17 @@ class ControlPlaneHeartbeat:
             self._thread.join(timeout=2.0)
 
     def _run(self) -> None:
+        # Memory is synced far less often than the heartbeat: the fact
+        # store changes slowly, and re-uploading it every 30s would be
+        # pure waste. Every ~5 minutes keeps the offline assistant
+        # current without the churn.
+        beats_per_sync = max(1, int(300 / max(self._interval, 1)))
+        beat = 0
         while not self._stop.is_set():
             send_heartbeat(self._url, self._secret, self._capabilities)
+            if beat % beats_per_sync == 0:
+                count = sync_memory(self._url, self._secret)
+                if count:
+                    logger.debug("Synced %d facts to the control plane", count)
+            beat += 1
             self._stop.wait(self._interval)
