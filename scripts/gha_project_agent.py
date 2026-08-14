@@ -41,7 +41,13 @@ from typing import Any, Dict, List, Optional
 
 GROQ_MODEL = "qwen/qwen3.6-27b"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-MAX_CONTEXT_CHARS = 60_000
+# Groq free tier allows 8k tokens/minute, and its request size limit
+# rejected a 60k-char context outright (HTTP 413, found live on the
+# first real run against this very repo). ~18k chars is roughly 4.5k
+# tokens, which leaves room for the answer inside one minute's budget.
+# Large repos are therefore analysed on a truncated view -- said out
+# loud in the prompt below rather than silently pretending otherwise.
+MAX_CONTEXT_CHARS = 18_000
 UA = "JARVIS-GHA-ProjectAgent/1.0"
 
 
@@ -110,7 +116,13 @@ def build_context(repo_dir: str) -> str:
         text = out.read_text(encoding="utf-8", errors="replace")
         out.unlink(missing_ok=True)
         if len(text) > MAX_CONTEXT_CHARS:
-            text = text[:MAX_CONTEXT_CHARS] + "\n\n[contexte tronqué]"
+            tree = run(["git", "ls-files"], cwd=repo_dir).stdout[:6000]
+            text = (
+                text[:MAX_CONTEXT_CHARS]
+                + "\n\n[CONTEXTE TRONQUÉ — dépôt trop gros pour être lu en entier. "
+                "Arborescence complète ci-dessous ; dis-le si ta réponse est limitée "
+                "par ce que tu n'as pas pu lire.]\n\nARBORESCENCE COMPLÈTE :\n" + tree
+            )
         return text
 
     log("repomix unavailable, falling back to a file listing")
