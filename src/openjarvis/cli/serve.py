@@ -815,6 +815,17 @@ def serve(
                     console.print("  Data backup: [cyan]active (GitHub, privé)[/cyan]")
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("Data backup service init failed: %s", exc)
+            # experiment: benchmark conclusions are written to long-term
+            # memory as sourced decisions (Brique 4 decision D3), so the
+            # same comparison isn't guessed at again next time.
+            try:
+                from openjarvis.tools.experiment import ExperimentTool
+
+                ExperimentTool._memory_backend = memory_backend
+                console.print("  Experiment bench: [cyan]active[/cyan]")
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("experiment tool injection failed: %s", exc)
+
             # deep_web_research needs the engine to plan sub-queries and
             # synthesize; injected post-build like the mission tools.
             try:
