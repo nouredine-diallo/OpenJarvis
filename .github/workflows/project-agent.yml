@@ -1,0 +1,54 @@
+name: JARVIS project agent
+
+# Works on one of the user's real GitHub projects from a GitHub-hosted
+# runner -- the machine that exists when their PC does not. Triggered
+# either by the always-on Cloudflare control plane (repository_dispatch)
+# or by hand for testing.
+
+on:
+  repository_dispatch:
+    types: [jarvis_project]
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: "owner/repo to work on (e.g. nouredine-diallo/LBS)"
+        required: true
+      mode:
+        description: "analyze (read-only) or implement (opens a PR)"
+        required: true
+        default: analyze
+      task:
+        description: "What to do / what to answer"
+        required: false
+      objective_file:
+        description: "Path to an objective .md inside the target repo"
+        required: false
+      mission_id:
+        description: "Control-plane mission id to report back to"
+        required: false
+
+jobs:
+  work:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run the project agent
+        env:
+          TARGET_REPO: ${{ github.event.inputs.target_repo || github.event.client_payload.target_repo }}
+          MODE: ${{ github.event.inputs.mode || github.event.client_payload.mode }}
+          TASK: ${{ github.event.inputs.task || github.event.client_payload.task }}
+          OBJECTIVE_FILE: ${{ github.event.inputs.objective_file || github.event.client_payload.objective_file }}
+          MISSION_ID: ${{ github.event.inputs.mission_id || github.event.client_payload.mission_id }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          # Scoped PAT covering the repos JARVIS may work on. Falls back to
+          # the run-scoped GITHUB_TOKEN, which can only reach this repo.
+          PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN || secrets.GITHUB_TOKEN }}
+          CONTROL_PLANE_URL: ${{ secrets.CONTROL_PLANE_URL }}
+          CONTROL_PLANE_SHARED_SECRET: ${{ secrets.CONTROL_PLANE_SHARED_SECRET }}
+        run: python3 scripts/gha_project_agent.py
