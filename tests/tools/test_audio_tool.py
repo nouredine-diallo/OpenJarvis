@@ -66,13 +66,44 @@ class TestAudioTranscribeTool:
         assert result.success is False
         assert "File too large" in result.content
 
-    def test_local_provider_not_implemented(self, tmp_path):
+    def test_local_provider_transcribes_via_faster_whisper(self, tmp_path):
+        """Brique 1 (docs/SPEC_BRIQUE1_INGESTION.md §4.3 point 2): the local
+        provider used to just return "not yet implemented" even though the
+        faster-whisper backend already existed -- only the wiring was
+        missing. Uses a real (silent) WAV so this exercises the actual
+        backend, not a mock."""
+        import struct
+        import wave
+
+        f = tmp_path / "audio.wav"
+        with wave.open(str(f), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            n_frames = 16000  # 1 second of silence
+            wf.writeframes(struct.pack("<%dh" % n_frames, *([0] * n_frames)))
+
+        tool = AudioTranscribeTool()
+        result = tool.execute(file_path=str(f), provider="local")
+        assert result.success is True
+        assert result.metadata["provider"] == "local"
+        assert "language" in result.metadata
+
+    def test_local_provider_missing_dependency_fails_cleanly(self, tmp_path, monkeypatch):
         f = tmp_path / "audio.wav"
         f.write_bytes(b"\x00" * 100)
         tool = AudioTranscribeTool()
+
+        real_import = builtins.__import__
+
+        def _block_faster_whisper(name, *args, **kwargs):
+            if name == "openjarvis.speech.faster_whisper":
+                raise ImportError("mocked")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _block_faster_whisper)
         result = tool.execute(file_path=str(f), provider="local")
         assert result.success is False
-        assert "not yet implemented" in result.content
 
     def test_unsupported_provider(self, tmp_path):
         f = tmp_path / "audio.mp3"

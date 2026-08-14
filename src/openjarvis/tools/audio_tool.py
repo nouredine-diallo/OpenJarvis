@@ -108,11 +108,7 @@ class AudioTranscribeTool(BaseTool):
         language = params.get("language")
 
         if provider == "local":
-            return ToolResult(
-                tool_name="audio_transcribe",
-                content="Local transcription provider is not yet implemented.",
-                success=False,
-            )
+            return self._transcribe_local(path, language)
 
         if provider != "openai":
             return ToolResult(
@@ -175,6 +171,46 @@ class AudioTranscribeTool(BaseTool):
                 content=f"Transcription error: {exc}",
                 success=False,
             )
+
+    def _transcribe_local(self, path: Path, language: Any) -> ToolResult:
+        """Free, local transcription via faster-whisper (Brique 1, spec
+        §4.3 point 2: this provider used to just return "not yet
+        implemented" -- the backend already existed
+        (speech/faster_whisper.py), only this wiring was missing."""
+        try:
+            from openjarvis.speech.faster_whisper import FasterWhisperBackend
+        except ImportError as exc:
+            return ToolResult(
+                tool_name="audio_transcribe",
+                content=f"faster-whisper n'est pas installé : {exc}",
+                success=False,
+            )
+
+        try:
+            backend = FasterWhisperBackend()
+            result = backend.transcribe(
+                path.read_bytes(),
+                format=path.suffix.lstrip("."),
+                language=language,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult(
+                tool_name="audio_transcribe",
+                content=f"Transcription error: {exc}",
+                success=False,
+            )
+
+        return ToolResult(
+            tool_name="audio_transcribe",
+            content=result.text,
+            success=True,
+            metadata={
+                "file_path": str(path.resolve()),
+                "provider": "local",
+                "language": result.language,
+                "duration_s": result.duration_seconds,
+            },
+        )
 
 
 __all__ = ["AudioTranscribeTool"]
