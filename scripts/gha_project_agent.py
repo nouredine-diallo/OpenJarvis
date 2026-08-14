@@ -212,7 +212,11 @@ def do_implement(repo_dir: str, task: str, objective: str, api_key: str) -> Dict
     if not match:
         return {"applied": False, "reason": f"réponse illisible du modèle : {raw[:300]}"}
     try:
-        payload = json.loads(match.group(0))
+        # strict=False tolerates literal newlines/tabs inside JSON strings.
+        # Models emit real line breaks in code payloads instead of \n escapes
+        # (seen live: a perfectly good React component rejected purely on
+        # encoding). The content is what matters here, not RFC-strict JSON.
+        payload = json.loads(match.group(0), strict=False)
     except json.JSONDecodeError as exc:
         return {"applied": False, "reason": f"JSON invalide ({exc}) : {raw[:300]}"}
 
