@@ -59,6 +59,8 @@ MAX_CONTEXT_CHARS = 8_000
 MAX_TREE_CHARS = 2_500
 # input + requested output must both fit inside ONE minute's 8k budget.
 ANSWER_TOKENS = 1_536
+# Writing whole files needs more room than a short analysis answer.
+IMPLEMENT_TOKENS = 3_072
 UA = "JARVIS-GHA-ProjectAgent/1.0"
 
 
@@ -148,7 +150,7 @@ def read_objective(repo_dir: str, objective_file: str) -> str:
     path = Path(repo_dir) / objective_file
     if not path.exists():
         return f"(fichier d'objectif introuvable : {objective_file})"
-    return path.read_text(encoding="utf-8", errors="replace")[:20_000]
+    return path.read_text(encoding="utf-8", errors="replace")[:4_000]
 
 
 ANALYZE_SYSTEM = (
@@ -164,17 +166,24 @@ ANALYZE_SYSTEM = (
     "- Réponds en français, de façon dense et sans remplissage."
 )
 
+# Whole files, not a diff. Asking a small free model for a byte-perfect
+# unified diff does not work in practice -- the first real run died on
+# "corrupt patch at line 34", because @@ hunk line counts have to be
+# exactly right and models get them wrong. Full file contents need no
+# line arithmetic, so they either parse or they don't.
 IMPLEMENT_SYSTEM = (
     "Tu es JARVIS, développeur sur le projet de Nourredine. On te donne le "
     "code du projet et une tâche à implémenter.\n"
     "RÈGLES STRICTES :\n"
-    "- Réponds UNIQUEMENT avec un patch au format diff unifié, applicable par "
-    "`git apply`. Aucun texte avant ou après.\n"
-    "- Chemins relatifs à la racine du dépôt, préfixés a/ et b/.\n"
-    "- Modifie le minimum de fichiers. N'invente pas d'API qui n'existe pas "
-    "dans le code fourni.\n"
-    "- Si la tâche est infaisable avec ce que tu vois, renvoie exactement : "
-    "IMPOSSIBLE: <raison courte>"
+    "- Réponds UNIQUEMENT avec un objet JSON, sans texte autour, de la forme :\n"
+    '  {"files": [{"path": "chemin/relatif.ts", "content": "contenu COMPLET"}], '
+    '"summary": "ce que tu as fait"}\n'
+    "- Donne le contenu ENTIER de chaque fichier, pas un extrait ni un diff.\n"
+    "- Privilégie la création de nouveaux fichiers plutôt que la réécriture "
+    "de gros fichiers existants.\n"
+    "- Respecte le style et les conventions visibles dans le code fourni.\n"
+    "- N'invente pas d'API absente du code fourni.\n"
+    "- Si la tâche est infaisable, renvoie : {\"impossible\": \"raison\"}"
 )
 
 
@@ -194,30 +203,44 @@ def do_implement(repo_dir: str, task: str, objective: str, api_key: str) -> Dict
         prompt += f"OBJECTIF FINAL :\n{objective}\n\n"
     prompt += f"TÂCHE À IMPLÉMENTER :\n{task}"
 
-    patch = ask_groq(api_key, IMPLEMENT_SYSTEM, prompt, max_tokens=ANSWER_TOKENS)
-    if patch.startswith("IMPOSSIBLE:"):
-        return {"applied": False, "reason": patch, "patch": ""}
+    raw = ask_groq(api_key, IMPLEMENT_SYSTEM, prompt, max_tokens=IMPLEMENT_TOKENS)
 
-    # Models habitually wrap diffs in fences despite instructions.
-    patch = re.sub(r"^```(?:diff|patch)?\s*", "", patch)
-    patch = re.sub(r"\s*```$", "", patch).strip() + "\n"
+    # Models habitually wrap JSON in fences despite instructions.
+    cleaned = re.sub(r"^```(?:json)?\s*", "", raw)
+    cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    if not match:
+        return {"applied": False, "reason": f"réponse illisible du modèle : {raw[:300]}"}
+    try:
+        payload = json.loads(match.group(0))
+    except json.JSONDecodeError as exc:
+        return {"applied": False, "reason": f"JSON invalide ({exc}) : {raw[:300]}"}
 
-    patch_file = Path(repo_dir) / ".jarvis.patch"
-    patch_file.write_text(patch, encoding="utf-8")
+    if payload.get("impossible"):
+        return {"applied": False, "reason": f"jugé infaisable : {payload['impossible']}"}
 
-    apply_proc = run(["git", "apply", "--verbose", ".jarvis.patch"], cwd=repo_dir)
-    patch_file.unlink(missing_ok=True)
-    if apply_proc.returncode != 0:
-        return {
-            "applied": False,
-            "reason": f"le patch ne s'applique pas : {apply_proc.stderr[:500]}",
-            "patch": patch,
-        }
+    files = payload.get("files") or []
+    if not files:
+        return {"applied": False, "reason": "le modèle n'a produit aucun fichier"}
+
+    written = []
+    for f in files:
+        rel = str(f.get("path") or "").lstrip("/")
+        content = f.get("content")
+        # Path traversal guard: a generated path must stay inside the repo.
+        target = (Path(repo_dir) / rel).resolve()
+        if not rel or content is None or not str(target).startswith(str(Path(repo_dir).resolve())):
+            return {"applied": False, "reason": f"chemin de fichier refusé : {rel!r}"}
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        written.append(rel)
+    log(f"wrote {len(written)} file(s): {', '.join(written)}")
 
     tests = run(["python", "-m", "pytest", "-q", "--timeout=120"], cwd=repo_dir)
     return {
         "applied": True,
-        "patch": patch,
+        "files": written,
+        "summary": payload.get("summary", ""),
         "tests_passed": tests.returncode == 0,
         "tests_output": (tests.stdout or tests.stderr)[-2000:],
     }
