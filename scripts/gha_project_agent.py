@@ -39,7 +39,13 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-GROQ_MODEL = "qwen/qwen3.6-27b"
+# NOT qwen3.6 here, despite it being the engine default: it reasons
+# inline in <think> and, under the free tier's tight per-minute token
+# budget, spends the entire output allowance thinking and returns an
+# empty answer (observed live -- a run "succeeded" with a blank
+# report). llama-3.3-70b answers directly, so every token of a scarce
+# budget goes to the answer instead of to discarded reasoning.
+GROQ_MODEL = "llama-3.3-70b-versatile"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 # Groq returns HTTP 413 when a SINGLE request exceeds the free tier's
 # 8k tokens-per-minute budget -- not just when the body is physically
@@ -310,6 +316,18 @@ def main() -> int:
     try:
         if mode == "analyze":
             answer = do_analyze(str(work), task, objective, api_key)
+            if not answer.strip():
+                # An empty answer previously still reported SUCCEEDED, so a
+                # blank report looked like a finished analysis. Absence of
+                # an answer is a failure, and must read as one.
+                msg = (
+                    f"# {repo} — analyse non aboutie\n\n"
+                    "Le modèle n'a produit aucune réponse exploitable "
+                    "(budget de tokens épuisé). Réessaie dans une minute."
+                )
+                print(msg)
+                report(cp_url, cp_secret, mission_id, "FAILED", msg)
+                return 1
             body = f"# État du projet {repo}\n\n{answer}"
             print(body)
             report(cp_url, cp_secret, mission_id, "SUCCEEDED", body)
